@@ -1,0 +1,4 @@
+# ignore mac specific temporary files
+.DS_store
+.DS_Store
+
