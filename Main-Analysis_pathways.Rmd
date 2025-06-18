@@ -123,7 +123,7 @@ InputHumannData.tse <- TreeSummarizedExperiment(
 
 # save this TSE object
 dir.create("Data/humann_data", recursive = TRUE, showWarnings = FALSE)
-write_tsv(as.data.frame(assay(InputHumannData.tse, "AbsAbund")), "Data/humann_data/humann3.9_unstratified_AbsCounts_raw.tsv")
+write_tsv(as.data.frame(assay(InputHumannData.tse, "AbsAbund")) %>% rownames_to_column("pathway"), "Data/humann_data/humann3.9_unstratified_AbsCounts_raw.tsv")
 
 
 
@@ -213,8 +213,8 @@ InputHumannData.tse[grepl("^UN", rownames(InputHumannData.tse)),] %>%
   cor()
 ```
 
-
-Conclusion: Wild mice have a tendency to have more 2% or more unmapped reads.
+Conclusion: Wild mice have a tendency to have more 2% less unmapped reads and 2%
+more unintegrated reads among the mapped ones. This or more unmapped reads.
 As a consequence, among the known genes and pathways they have less unintegrated
 gene families. This confirms that 
 **WildR mice microbiomes are less characterized and isolated**
