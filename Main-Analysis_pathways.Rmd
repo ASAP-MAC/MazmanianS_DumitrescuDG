@@ -18,7 +18,7 @@ output:
 params:
   basic_outdir: "results"
   microbiome_basic_transform: "RelAbund"
-  humann_data_type: "pathway"
+  humann_data_type: "pathways"
   beta_dist: "bray"
   beta_MDS: "MDS"
 ---
@@ -157,7 +157,7 @@ hist_unintegrated <- ggplot(data.frame(UNINTEGRATED = assay(InputHumannData.tse,
 ggarrange(stackplot_top_N, ggarrange(hist_unmapped, hist_unintegrated, nrow = 1, ncol = 2), nrow = 2, ncol = 1, common.legend = TRUE, legend = "bottom")
 ```
 
-## UNSCALED and UNINTEGRATED reads vary with Microbiome
+## UNMAPPED and UNINTEGRATED reads vary with Microbiome
 
 ```{r}
 
@@ -197,11 +197,14 @@ stats_unintegr_unmapp %>%
 
 
 ```
-UNMAPPED: Reads did not map to any gene-gene family
-UNINTEGRATED: Reads did map into a gene-gene family, BUT but that gene-gene famly was not in the pathways database
+UNMAPPED: Reads did not map to any gene/gene family
+UNINTEGRATED: Reads did map into a gene-gene family, BUT but that gene/gene family was not in the pathways database
 ```
 
-Is it generally true that unmapped and unintegrated have opposite trends?
+Fractions of Unmapped and Unintegrated reads have opposite trends because if 
+one sample has a higher fraction of unmapped reads, it will necessarily 
+have a smaller fraction of unintegrated and correctly mapped ones. Vice versa,
+if the unintegrated fraction is higher, unmapped reads will have to be less.
 
 ```{r}
 InputHumannData.tse[grepl("^UN", rownames(InputHumannData.tse)),] %>% 
