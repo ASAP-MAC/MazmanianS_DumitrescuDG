@@ -1,0 +1,480 @@
+---
+title: "Functional differences between wild mice microbiome and SPF in ASO mice"
+subtitle: "Data: HUMAnN 3.9 unstratified pathways"
+author: "Daniel Dumitrescu, Giacomo Antonello, Nicola Segata, Levi Waldron, Sarkis Mazmanian"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    toc_depth: 3
+    code_folding: hide
+    toc_float: true
+    number_sections: true
+    thumbnails: false
+    lightbox: true
+    gallery: false
+    use_bookdown: true
+    highlight: haddock
+params:
+  basic_outdir: "results"
+  microbiome_basic_transform: "RelAbund"
+  humann_data_type: "pathway"
+  beta_dist: "bray"
+  beta_MDS: "MDS"
+---
+
+```{r}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r, include=FALSE}
+# packages for tabular data manipulation
+library(tidyverse)
+library(data.table)
+
+# microbiome specific packages
+library(maaslin3)
+library(mia)
+# some packages for data visualization (plots and tables)
+library(miaViz)
+library(pheatmap)
+library(UpSetR)
+library(ggpubr)
+library(kableExtra)
+library(reactable)
+
+# MAC's package to download data
+library(parkinsonsMetagenomicData) # devtools::install_github("ASAP-MAC/parkinsonsMetagenomicData")
+library(biobakeryUtils) # devtools::install_github("g-antonello/biobakeryUtils")
+library(ggh4x) # for complex ggplot2 faceting
+# set ggplot2 plot themes 
+theme_set(theme_light())
+# set seed for reproducibility
+set.seed(1234)
+```
+
+# Create output directories all in one chunk
+
+```{r}
+
+output_directories.list <- list(
+  # alpha diversity directory
+  alpha_div_outdir = file.path(params$basic_outdir, params$humann_data_type, "01_alpha_diversity"),
+  # beta diversity output directory
+  beta_div_outdir = file.path(params$basic_outdir, params$humann_data_type, "02_beta_diversity"),
+  # differential abundance temporary directory
+  maaslin_tmpdir = "~/Documents/maaslin3_tmp_results/mazmanian_Danny"
+)
+
+tmp_out <- capture.output(sapply(output_directories.list, dir.create, showWarnings = FALSE, recursive = TRUE))
+rm(tmp_out)
+```
+
+# Prepare data for analysis
+
+THis is run only if interactive to avoid careless overwriting
+
+```{r, eval=interactive(), message=FALSE}
+
+# Load metadata
+metadata.df <- read_tsv("Data/metadata_4.0.tsv") %>% 
+  # format a few values in the metadata
+  mutate(
+    sex = as.factor(sex),
+    cage = as.factor(cage),
+    donor_microbiome_type = factor(donor_microbiome_type, levels = c("SPF", "WildR")),
+    ) %>% 
+  as.data.frame()
+
+rownames(metadata.df) <- metadata.df$uuid
+
+googleCloudStorageR::gcs_auth(json_file = "~/Downloads/curatedmetagenomicdata-232f4a306d1d.json")
+
+# HUMAnN_3.9 pathway abundance unstratified
+humann_unstrat_cache <- cacheMetagenomicData(metadata.df$uuid, data_type = "pathabundance_unstratified", redownload = "no")
+
+# mpa_cache <- cacheMetagenomicData(metadata.df$uuid, data_type = "relative_abundance", redownload = "no") %>% 
+#   # retrieve reads per sample too
+#   mutate(n_reads_processed = get_reads_processed(cache_path))
+
+humann_unstrat.se <- loadMetagenomicData(humann_unstrat_cache)
+pathways_raw <- rownames(humann_unstrat.se)
+# make initial rowData
+rowData.df <- DataFrame(
+  MetaCyc_code = sapply(strsplit(rownames(humann_unstrat.se), "\\:\\ "), "[", 1),
+  MetaCyc_longer_name = sapply(strsplit(rownames(humann_unstrat.se), "\\:\\ "), "[", 2),
+  full_name = rownames(humann_unstrat.se), 
+  row.names = rownames(humann_unstrat.se))
+# fix NA in longer_name because of UNMAPPED/UNINTEGRATED
+rowData.df$MetaCyc_longer_name[is.na(rowData.df$MetaCyc_longer_name)] <- rowData.df$full_name[is.na(rowData.df$MetaCyc_longer_name)]
+# assign rowData
+rowData(humann_unstrat.se) <- rowData.df
+# identical(metadata.df$uuid, colnames(humann_unstrat.se)) # TRUE
+
+
+# Create a de novo TreeSummarizedExperiment
+InputHumannData.tse <- TreeSummarizedExperiment(
+  list("AbsAbund" = assay(humann_unstrat.se), 
+       "AbsAbund_round" = round(assay(humann_unstrat.se), 0),
+       "RelAbund" = apply(assay(humann_unstrat.se), 2, function(x) x/sum(x))
+       ),
+  rowData = rowData.df, 
+  colData =  DataFrame(metadata.df))
+
+# save this TSE object
+dir.create("Data/humann_data", recursive = TRUE, showWarnings = FALSE)
+write_tsv(as.data.frame(assay(InputHumannData.tse, "AbsAbund")), "Data/humann_data/humann3.9_unstratified_AbsCounts_raw.tsv")
+
+
+
+saveRDS(InputHumannData.tse, "Data/InputHumannData.tse.Rds")
+
+```
+
+```{r}
+InputHumannData.tse <- readRDS("Data/InputHumannData.tse.Rds")
+InputHumannData.tse
+```
+
+# The vast majority of reads do not map to a pathway
+
+These features will be removed, because they are crushing the remaining pathways
+
+
+```{r, fig.height = 8, fig.width=12, fig.cap="Stack plot of the top 30 most abundant pathways, with highlight on the distribution of UNMAPPED and UNINTEGRATED reads."}
+topN_pwys <- getTop(InputHumannData.tse, 20, assay.type = "RelAbund")
+colors_top2 <- rev(scater:::.get_palette(palette_name = "tableau10medium"))[1:2]
+stackplot_top_N <- InputHumannData.tse[topN_pwys, ] %>% 
+  miaViz::plotAbundance(assay.type = "RelAbund") + 
+  theme(legend.position = "bottom")
+
+hist_unmapped <- ggplot(data.frame(UNMAPPED = assay(InputHumannData.tse, "RelAbund")["UNMAPPED", ]), aes(x = UNMAPPED)) + 
+  geom_histogram(binwidth = 0.01, fill = colors_top2[1], alpha = 0.65)
+
+hist_unintegrated <- ggplot(data.frame(UNINTEGRATED = assay(InputHumannData.tse, "RelAbund")["UNINTEGRATED", ]), aes(x = UNINTEGRATED)) + 
+  geom_histogram(binwidth = 0.01,  fill = colors_top2[2], alpha = 0.65)
+
+ggarrange(stackplot_top_N, ggarrange(hist_unmapped, hist_unintegrated, nrow = 1, ncol = 2), nrow = 2, ncol = 1, common.legend = TRUE, legend = "bottom")
+```
+
+## UNSCALED and UNINTEGRATED reads vary with Microbiome
+
+```{r}
+
+stats_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = "RelAbund", add.col = c("sex", "donor_microbiome_type")) %>% 
+  filter(grepl("^UN", FeatureID)) %>% 
+  group_by(FeatureID) %>% 
+  nest() %>% 
+  mutate(
+    model = map(data, ~broom::tidy(lm(RelAbund ~ sex + donor_microbiome_type, data = .x)))
+  ) %>% 
+  unnest(model)
+
+plot_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = "RelAbund", add.col = c("sex", "donor_microbiome_type")) %>% 
+  filter(grepl("^UN", FeatureID)) %>% 
+  ggplot(aes(x = sex, y = RelAbund, color = donor_microbiome_type)) + 
+  geom_boxplot(width = 0.3) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, seed = 1234)) +
+  facet_wrap(~FeatureID) + 
+  labs(
+    color = "Donor Microbiome"
+  ) + 
+  theme_bw() + 
+  theme(legend.position = "top")
+```
+
+```{r}
+plot_unintegr_unmapp
+```
+
+```{r}
+stats_unintegr_unmapp %>% 
+  select(-data) %>% 
+  filter(grepl("donor_microbiome_type", term)) %>% 
+  kbl() %>% 
+  kable_styling()
+```
+
+
+```
+UNMAPPED: Reads did not map to any gene-gene family
+UNINTEGRATED: Reads did map into a gene-gene family, BUT but that gene-gene famly was not in the pathways database
+```
+
+Is it generally true that unmapped and unintegrated have opposite trends?
+
+```{r}
+InputHumannData.tse[grepl("^UN", rownames(InputHumannData.tse)),] %>% 
+  assay("RelAbund") %>%
+  t() %>% 
+  cor()
+```
+
+
+Conclusion: Wild mice have a tendency to have more 2% or more unmapped reads.
+As a consequence, among the known genes and pathways they have less unintegrated
+gene families. This confirms that 
+**WildR mice microbiomes are less characterized and isolated**
+
+## WildR mice have more pathways per sample mapped than SPF
+
+```{r}
+alpha_indices <- c("dbp_dominance", "gini", "observed_richness", "shannon_diversity")
+InputHumannData.tse <- addAlpha(InputHumannData.tse, assay.type = "RelAbund", index = alpha_indices)
+
+tmp <- sapply(alpha_indices, function(div) {
+  lm(as.formula(paste(div, "~", "sex + donor_microbiome_type")), data = colData(InputHumannData.tse))
+  
+}, USE.NAMES = TRUE, simplify = FALSE)
+
+table_results.df <- tmp %>% lapply(broom::tidy) %>% 
+  bind_rows(.id = "AlphaIndex") %>% 
+  filter(!grepl("Intercept", term))
+
+table_results.df %>%
+  kbl() %>% 
+  row_spec(which(table_results.df$p.value < 0.05), bold = TRUE) %>% 
+  kable_styling()
+```
+
+WildR microbiomes show more pathways and minimally more evenly distributed 
+abundances of such pathways. 
+
+# Compositional differences in relation to the donor microbiome
+
+```{r}
+InputHumannData_noUN_rescaled.tse <- InputHumannData.tse[!grepl("^UN", rownames(InputHumannData.tse)),]
+InputHumannData_noUN_rescaled.tse <- transformAssay(InputHumannData_noUN_rescaled.tse, assay.type = "RelAbund", method = "relabundance", name = "RelAbund_rescaled")
+
+InputHumannData_noUN_rescaled.tse
+```
+
+```{r}
+dimRedName <- paste(params$beta_dist, "mds", sep = "_")
+# this will work once mia or TreeSummarizedExperiment fixes some things
+InputHumannData_noUN_rescaled.tse <- mia::addMDS(
+  InputHumannData_noUN_rescaled.tse,
+  assay.type = "RelAbund",
+  method = params$beta_dist,
+  ncomponents = 3, name = dimRedName
+  )
+
+variances_explained <- attr(reducedDim(InputHumannData_noUN_rescaled.tse, dimRedName), "eig")
+prop_variances_explained <- variances_explained/sum(variances_explained)
+
+project1_meta_with_MDS.df <- cbind.data.frame(as.data.frame(colData(InputHumannData_noUN_rescaled.tse)), reducedDim(InputHumannData_noUN_rescaled.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
+
+beta_plot_basic <- project1_meta_with_MDS.df %>% 
+  ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = paste(sex, donor_microbiome_type))) + 
+  geom_point(size = 2) + 
+  stat_ellipse(show.legend = FALSE) + 
+  #scale_color_manual(values = ggsci::pal_jco()(6)) +
+  theme(legend.position = "top") +
+  labs(color = "Sex and Microbiome",
+       x = paste0("MDS 1 [", round(prop_variances_explained[1]*100, 1), "%]"),
+       y = paste0("MDS 2 [", round(prop_variances_explained[2]*100, 2), "%]")
+  )
+
+```
+
+```{r}
+ggsave(plot = beta_plot_basic, filename = file.path(output_directories.list$beta_div_outdir, "bray_MDS_plot.png"), dpi = 600, height = 7.5, width = 6)
+
+beta_plot_basic
+```
+
+## PERMANOVA statistics
+
+```{r}
+
+InputHumannData_noUN_rescaled.tse <- addPERMANOVA(
+  InputHumannData_noUN_rescaled.tse,
+  assay.type = "RelAbund",
+  method = "bray",
+  formula = x ~ sex + donor_microbiome_type,
+  name = "permanova",
+  permutations = 999,
+  test.homogeneity = TRUE
+)
+
+permanova_table.df <- PERMANOVA_to_table(InputHumannData_noUN_rescaled.tse)
+
+write_tsv(permanova_table.df, file = file.path(output_directories.list$beta_div_outdir, paste(params$beta_dist, "adonisPermanova", "sex", "donor_microbiome_type.tsv", sep = "_")))
+```
+
+```{r}
+permanova_table.df %>% 
+  kbl() %>% 
+  kable_styling()
+```
+
+## Unsupervised heatmap of all pathways show 4 WildR mice with SPF-like microbiomes
+
+And they do not belong to one specific cage
+
+```{r}
+pheatmap::pheatmap(assay(InputHumannData_noUN_rescaled.tse, "RelAbund") %>% magrittr::set_colnames(colData(InputHumannData_noUN_rescaled.tse)$sample_name), scale = "row", annotation_col = colData(InputHumannData_noUN_rescaled.tse) %>% as.data.frame() %>%  magrittr::set_rownames(.$sample_name) %>% select(sex, donor_microbiome_type, cage), angle_col = 315, show_rownames = FALSE)
+```
+
+# Differentially abundant pathways in `WildR` mice compared to SPF
+
+$$
+\log_2(Pathway) \sim sex + \text{donor_microbiome_type}
+$$
+
+```{r}
+# prepare input data
+
+tmp.tse <- InputHumannData_noUN_rescaled.tse
+tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
+tmp.tse
+
+# define experiment name and output directories
+maaslin3_expmt <- "WildR_vs_SPD_adj_sex"
+maaslin3_tmp_outdir <- file.path(output_directories.list$maaslin_tmpdir,  maaslin3_expmt)
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$humann_data_type, maaslin3_expmt)
+# crate temporary output directory
+dir.create(maaslin3_tmp_outdir, showWarnings = FALSE, recursive = TRUE)
+# create definitive output directory
+dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
+```
+
+Results are stored in ``r maaslin3_final_outdir``
+
+```{r}
+set.seed(1234)
+pathway_differences_in_WildR_mice.maaslin3 <- maaslin3(
+    input_data = tmp.tse,
+    formula = ~ sex + donor_microbiome_type, 
+    transform = "LOG", 
+    normalization = "TSS",
+    output = maaslin3_tmp_outdir,
+    # do not standardize continuous metadata variables in the model
+    standardize = FALSE,
+    plot_associations = FALSE,
+    save_plots_rds = TRUE,
+    verbosity = "ERROR"
+  )
+
+# add taxonomy
+pathway_differences_in_WildR_mice.maaslin3_curated <- list(
+  "prevalence" = pathway_differences_in_WildR_mice.maaslin3$fit_data_prevalence$results,
+  "abundance" = pathway_differences_in_WildR_mice.maaslin3$fit_data_abundance$results
+  )
+
+# write tables
+write_maaslin3_curated_tables(pathway_differences_in_WildR_mice.maaslin3_curated, out.dir = maaslin3_final_outdir)
+# save raw output
+saveRDS(pathway_differences_in_WildR_mice.maaslin3, file = file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
+```
+
+
+```{r, fig.height=10, fig.width=16}
+readRDS(file.path(maaslin3_tmp_outdir, "figures", "summary_plot_gg.RDS"))
+```
+
+## Differentially prevalent pathways
+
+### P-value and FDR histograms
+
+```{r, fig.width=8, fig.height=5}
+pval_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$prevalence %>% 
+  filter(
+    value == "WildR"
+    ) %>% 
+  ggplot(aes(x = pval_individual)) + 
+  geom_histogram() +
+  labs(
+    title = "P-value (individual)"
+  )
+
+FDR_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$prevalence %>% 
+  filter(
+    value == "WildR"
+  ) %>% 
+  ggplot(aes(x = qval_individual)) + 
+  geom_histogram() +
+  labs(
+    title = "FDR (individual)"
+    )
+
+ggarrange(pval_histogram, FDR_histogram)
+```
+
+### Table of FDR < 0.1 prevalence associations
+
+```{r}
+pathway_differences_in_WildR_mice.maaslin3_curated$prevalence %>% 
+  filter(qval_individual < 0.1, is.na(error), value == "WildR") %>% 
+  arrange(desc(abs(coef))) %>% 
+  select(-metadata, -value) %>% 
+  DT::datatable(
+     extensions = "Buttons",
+    options = list(dom = "Bfrtip",
+                   buttons = c('copy', 'csv', 'excel', 'pdf'))
+  )
+```
+
+## Differentially abundant pathways
+
+### P-value and FDR histograms
+
+```{r, fig.width=8, fig.height=5}
+pval_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$abundance %>% filter(
+  value == "WildR"
+) %>% 
+  ggplot(aes(x = pval_individual)) + 
+  geom_histogram() +
+  labs(
+    title = "P-value (individual)"
+  )
+
+FDR_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$abundance %>% filter(
+  value == "WildR"
+) %>% 
+  ggplot(aes(x = qval_individual)) + 
+  geom_histogram() +
+  labs(
+    title = "FDR (individual)"
+    )
+
+ggarrange(pval_histogram, FDR_histogram)
+```
+
+### Table of FDR < 0.1 abundance associations
+
+```{r}
+pathway_differences_in_WildR_mice.maaslin3_curated$abundance %>% 
+  filter(qval_individual < 0.1, is.na(error), value == "WildR") %>% 
+  arrange(desc(abs(coef))) %>% 
+  select(-metadata, -value) %>% 
+  DT::datatable(
+     extensions = "Buttons",
+    options = list(dom = "Bfrtip",
+                   buttons = c('copy', 'csv', 'excel', 'pdf'))
+  )
+```
+
+As it often happens with pathway analyses, there are MANY statistical 
+associations.
+
+
+# Pathways table per microbiome type
+
+```{r}
+InputHumannData_noUN_rescaled.tse %>% 
+  meltSE(assay.type = "RelAbund_rescaled", add.col = c("donor_microbiome_type")) %>% 
+  group_by(FeatureID, donor_microbiome_type) %>% 
+  reframe(
+    N = n(),
+    N_not_0 = sum(RelAbund_rescaled > 0),
+    mean_abund = mean(RelAbund_rescaled)
+  ) %>% 
+  pivot_wider(names_from = "donor_microbiome_type", values_from = c("N", "N_not_0", "mean_abund")) %>% 
+  DT::datatable(
+     extensions = "Buttons",
+    options = list(dom = "Bfrtip",
+                   buttons = c('copy', 'csv', 'excel', 'pdf'))
+  )
+```
+
