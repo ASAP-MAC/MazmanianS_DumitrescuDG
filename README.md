@@ -5,3 +5,7 @@ Danny is working with two mouse models: standard SPF mice as well as those harbo
 To that end, his goal is to integrate the metagenomics data generated here with a **paired untargeted metabolomics dataset** he already has, and predict relationships between specific microbial taxa/pathways/genes and metabolite features using mmvec. Let me know if we should discuss the format of this further or perhaps this is very standard for you.
 
 The main comparison is between SPF and WildR animals (subcohort column) of both sexes.
+
+# Scripts and Data
+Scripts are available both on OneDrive and this GitHub repository. 
+Data, both input and results, are available exclusively on [OneDrive](https://cuny907-my.sharepoint.com/:f:/g/personal/giacomo_antonello53_login_cuny_edu/Eh4-tA9xznFOqKGLIlrDbYkBfSeLIDmps-cKIpPnkxlcAA?e=SD5l0j)
