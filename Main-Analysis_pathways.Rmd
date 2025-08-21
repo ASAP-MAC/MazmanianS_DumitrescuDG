@@ -17,8 +17,8 @@ output:
     highlight: haddock
 params:
   basic_outdir: "results"
-  microbiome_basic_transform: "gene_family_abundance_rpk_relab_unstratified"
-  humann_data_type: "pathways"
+  assayTested: "pathway_abundance_unstratified"
+  microbiome_data_type: "pathways"
   beta_dist: "bray"
   beta_MDS: "MDS"
 ---
@@ -59,9 +59,9 @@ set.seed(1234)
 
 output_directories.list <- list(
   # alpha diversity directory
-  alpha_div_outdir = file.path(params$basic_outdir, params$humann_data_type, "01_alpha_diversity"),
+  alpha_div_outdir = file.path(params$basic_outdir, params$microbiome_data_type, "01_alpha_diversity"),
   # beta diversity output directory
-  beta_div_outdir = file.path(params$basic_outdir, params$humann_data_type, "02_beta_diversity")
+  beta_div_outdir = file.path(params$basic_outdir, params$microbiome_data_type, "02_beta_diversity")
 )
 
 tmp_out <- capture.output(sapply(output_directories.list, dir.create, showWarnings = FALSE, recursive = TRUE))
@@ -80,16 +80,16 @@ InputHumannData.tse
 These features will be removed, because they are crushing the remaining pathways
 
 ```{r, fig.height = 8, fig.width=12, fig.cap="Stack plot of the top 30 most abundant pathways, with highlight on the distribution of UNMAPPED and UNINTEGRATED reads."}
-topN_pwys <- getTop(InputHumannData.tse, 20, assay.type = "gene_family_abundance_rpk_relab_unstratified")
+topN_pwys <- getTop(InputHumannData.tse, 20, assay.type = params$assayTested)
 colors_top2 <- rev(scater:::.get_palette(palette_name = "tableau10medium"))[1:2]
 stackplot_top_N <- InputHumannData.tse[topN_pwys, ] %>% 
-  miaViz::plotAbundance(assay.type = "gene_family_abundance_rpk_relab_unstratified") + 
+  miaViz::plotAbundance(assay.type = params$assayTested) + 
   theme(legend.position = "bottom")
 
-hist_unmapped <- ggplot(data.frame(UNMAPPED = assay(InputHumannData.tse, "gene_family_abundance_rpk_relab_unstratified")["UNMAPPED", ]), aes(x = UNMAPPED)) + 
+hist_unmapped <- ggplot(data.frame(UNMAPPED = assay(InputHumannData.tse, params$assayTested)["UNMAPPED", ]), aes(x = UNMAPPED)) + 
   geom_histogram(binwidth = 0.01, fill = colors_top2[1], alpha = 0.65)
 
-hist_unintegrated <- ggplot(data.frame(UNINTEGRATED = assay(InputHumannData.tse, "gene_family_abundance_rpk_relab_unstratified")["UNINTEGRATED", ]), aes(x = UNINTEGRATED)) + 
+hist_unintegrated <- ggplot(data.frame(UNINTEGRATED = assay(InputHumannData.tse, params$assayTested)["UNINTEGRATED", ]), aes(x = UNINTEGRATED)) + 
   geom_histogram(binwidth = 0.01,  fill = colors_top2[2], alpha = 0.65)
 
 ggarrange(stackplot_top_N, ggarrange(hist_unmapped, hist_unintegrated, nrow = 1, ncol = 2), nrow = 2, ncol = 1, common.legend = TRUE, legend = "bottom")
@@ -99,18 +99,18 @@ ggarrange(stackplot_top_N, ggarrange(hist_unmapped, hist_unintegrated, nrow = 1,
 
 ```{r}
 
-stats_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = "gene_family_abundance_rpk_relab_unstratified", add.col = c("sex", "donor_microbiome_type")) %>% 
+stats_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = params$assayTested, add.col = c("sex", "donor_microbiome_type")) %>% 
   filter(grepl("^UN", FeatureID)) %>% 
   group_by(FeatureID) %>% 
   nest() %>% 
   mutate(
-    model = map(data, ~broom::tidy(lm(gene_family_abundance_rpk_relab_unstratified ~ sex + donor_microbiome_type, data = .x)))
+    model = map(data, ~broom::tidy(lm(!!sym(params$assayTested) ~ sex + donor_microbiome_type, data = .x)))
   ) %>% 
   unnest(model)
 
-plot_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = "gene_family_abundance_rpk_relab_unstratified", add.col = c("sex", "donor_microbiome_type")) %>% 
+plot_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = params$assayTested, add.col = c("sex", "donor_microbiome_type")) %>% 
   filter(grepl("^UN", FeatureID)) %>% 
-  ggplot(aes(x = sex, y = gene_family_abundance_rpk_relab_unstratified, color = donor_microbiome_type)) + 
+  ggplot(aes(x = sex, y = !!sym(params$assayTested), color = donor_microbiome_type)) + 
   geom_boxplot(width = 0.3) +
   geom_point(position = position_jitterdodge(jitter.width = 0.2, seed = 1234)) +
   facet_wrap(~FeatureID) + 
@@ -146,7 +146,7 @@ if the unintegrated fraction is higher, unmapped reads will have to be less.
 
 ```{r}
 InputHumannData.tse[grepl("^UN", rownames(InputHumannData.tse)),] %>% 
-  assay("gene_family_abundance_rpk_relab_unstratified") %>%
+  assay(params$assayTested) %>%
   t() %>% 
   cor()
 ```
@@ -161,7 +161,7 @@ gene families. This confirms that
 
 ```{r}
 alpha_indices <- c("dbp_dominance", "gini", "observed_richness", "shannon_diversity")
-InputHumannData.tse <- addAlpha(InputHumannData.tse, assay.type = "gene_family_abundance_rpk_relab_unstratified", index = alpha_indices)
+InputHumannData.tse <- addAlpha(InputHumannData.tse, assay.type = params$assayTested, index = alpha_indices)
 
 tmp <- sapply(alpha_indices, function(div) {
   lm(as.formula(paste(div, "~", "sex + donor_microbiome_type")), data = colData(InputHumannData.tse))
@@ -188,7 +188,7 @@ dimRedName <- paste(params$beta_dist, "mds", sep = "_")
 # this will work once mia or TreeSummarizedExperiment fixes some things
 InputHumannData.tse <- mia::addMDS(
   InputHumannData.tse,
-  assay.type = "gene_family_abundance_rpk_relab_unstratified",
+  assay.type = params$assayTested,
   method = params$beta_dist,
   ncomponents = 3, name = dimRedName
   )
@@ -216,7 +216,7 @@ dimRedName <- paste(params$beta_dist, "mds", "no_UN.", sep = "_")
 # this will work once mia or TreeSummarizedExperiment fixes some things
 InputHumannData.tse <- mia::addMDS(
   InputHumannData.tse[!startsWith(rownames(InputHumannData.tse), "UN"),],
-  assay.type = "gene_family_abundance_rpk_relab_unstratified",
+  assay.type = params$assayTested,
   method = params$beta_dist,
   ncomponents = 3, name = dimRedName
   )
@@ -254,7 +254,7 @@ ggarrange(beta_plot_all_features + labs(title = "All Features"),
 
 InputHumannData.tse <- addPERMANOVA(
   InputHumannData.tse,
-  assay.type = "gene_family_abundance_rpk_relab_unstratified",
+  assay.type = params$assayTested,
   method = "bray",
   formula = x ~ sex + donor_microbiome_type,
   name = "permanova",
@@ -278,10 +278,12 @@ permanova_table.df %>%
 And they do not belong to one specific cage
 
 ```{r, fig.height=8, fig.width=10}
-pheatmap::pheatmap(assay(InputHumannData.tse, "gene_family_abundance_rpk_relab_unstratified") %>% magrittr::set_colnames(colData(InputHumannData.tse)$sample_name), scale = "row", annotation_col = colData(InputHumannData.tse) %>% as.data.frame() %>%  magrittr::set_rownames(.$sample_name) %>% select(sex, donor_microbiome_type, cage), angle_col = 315, show_rownames = FALSE)
+pheatmap::pheatmap(assay(InputHumannData.tse, params$assayTested) %>% magrittr::set_colnames(colData(InputHumannData.tse)$sample_name), scale = "row", annotation_col = colData(InputHumannData.tse) %>% as.data.frame() %>%  magrittr::set_rownames(.$sample_name) %>% select(sex, donor_microbiome_type, cage), angle_col = 315, show_rownames = FALSE)
 ```
 
-# Differentially abundant pathways in `WildR` mice compared to SPF
+# Differentially abundant taxa in `WildR` mice compared to SPF
+
+## Sex adjusted
 
 $$
 \log_2(Pathway) \sim sex + \text{donor_microbiome_type}
@@ -295,8 +297,8 @@ tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
 tmp.tse
 
 # define experiment name and output directories
-maaslin3_expmt <- "WildR_vs_SPD_adj_sex"
-maaslin3_final_outdir <- file.path(params$basic_outdir, params$humann_data_type, maaslin3_expmt)
+maaslin3_expmt <- "WildR_vs_SPF_adj_sex"
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
 # create definitive output directory
 dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
 ```
@@ -305,42 +307,104 @@ Results are stored in ``r maaslin3_final_outdir``
 
 ```{r}
 set.seed(1234)
-pathway_differences_in_WildR_mice.maaslin3 <- maaslin3(
+WildR_vs_SPF_adj_Sex.maaslin3 <- maaslin3(
     input_data = tmp.tse,
     formula = ~ sex + donor_microbiome_type, 
-    transform = "LOG", 
-    normalization = "TSS",
+    transform = "LOG",
     output = maaslin3_final_outdir,
     # do not standardize continuous metadata variables in the model
     standardize = FALSE,
     plot_associations = FALSE,
     save_plots_rds = TRUE,
-    verbosity = "ERROR"
+		verbosity = "ERROR"
   )
 
-# add taxonomy
-pathway_differences_in_WildR_mice.maaslin3_curated <- list(
-  "prevalence" = pathway_differences_in_WildR_mice.maaslin3$fit_data_prevalence$results,
-  "abundance" = pathway_differences_in_WildR_mice.maaslin3$fit_data_abundance$results
-  )
-
-# write tables
-write_maaslin3_curated_tables(pathway_differences_in_WildR_mice.maaslin3_curated, out.dir = maaslin3_final_outdir)
 # save raw output
-saveRDS(pathway_differences_in_WildR_mice.maaslin3, file = file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
+saveRDS(WildR_vs_SPF_adj_Sex.maaslin3, file = file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
 ```
 
-
-```{r, fig.height=10, fig.width=16}
+```{r, fig.height=10, fig.width=12}
 readRDS(file.path(maaslin3_final_outdir, "figures", "summary_plot_gg.RDS"))
 ```
 
-## Differentially prevalent pathways
+## Males
 
-### P-value and FDR histograms
+```{r}
+# prepare input data
+
+tmp.tse <- InputHumannData.tse[,colData(InputHumannData.tse)$sex == "Male"]
+tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
+tmp.tse
+
+# define experiment name and output directories
+maaslin3_expmt <- "WildR_vs_SPF_Males"
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
+# create definitive output directory
+dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
+```
+
+Results are stored in ``r maaslin3_final_outdir``
+
+```{r}
+set.seed(1234)
+WildR_vs_SPF_Males.maaslin3 <- maaslin3(
+    input_data = tmp.tse,
+    formula = ~ donor_microbiome_type, 
+    transform = "LOG",
+    output = maaslin3_final_outdir,
+    # do not standardize continuous metadata variables in the model
+    standardize = FALSE,
+    plot_associations = FALSE,
+    save_plots_rds = TRUE,
+		verbosity = "ERROR"
+  )
+
+# save raw output
+saveRDS(WildR_vs_SPF_adj_Sex.maaslin3, file = file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
+```
+
+## Females
+
+```{r}
+# prepare input data
+
+tmp.tse <- InputHumannData.tse[,colData(InputHumannData.tse)$sex == "Female"]
+tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
+tmp.tse
+
+# define experiment name and output directories
+maaslin3_expmt <- "WildR_vs_SPF_Females"
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
+# create definitive output directory
+dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
+```
+
+Results are stored in ``r maaslin3_final_outdir``
+
+```{r}
+set.seed(1234)
+WildR_vs_SPF_Females.maaslin3 <- invisible(maaslin3(
+    input_data = tmp.tse,
+    formula = ~ donor_microbiome_type, 
+    transform = "LOG",
+    output = maaslin3_final_outdir,
+    # do not standardize continuous metadata variables in the model
+    standardize = FALSE,
+    plot_associations = FALSE,
+    save_plots_rds = TRUE,
+		verbosity = "ERROR"
+  ))
+
+# save raw output
+saveRDS(WildR_vs_SPF_adj_Sex.maaslin3, file = file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
+```
+
+# Differentially prevalent taxa in sex-adjusted model
+
+## P-value and FDR histograms
 
 ```{r, fig.width=8, fig.height=5}
-pval_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$prevalence %>% 
+pval_histogram <- WildR_vs_SPF_adj_Sex.maaslin3$fit_data_prevalence$results %>% 
   filter(
     value == "WildR"
     ) %>% 
@@ -350,7 +414,7 @@ pval_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$prevalence 
     title = "P-value (individual)"
   )
 
-FDR_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$prevalence %>% 
+FDR_histogram <- WildR_vs_SPF_adj_Sex.maaslin3$fit_data_prevalence$results %>% 
   filter(
     value == "WildR"
   ) %>% 
@@ -363,10 +427,10 @@ FDR_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$prevalence %
 ggarrange(pval_histogram, FDR_histogram)
 ```
 
-### Table of FDR < 0.1 prevalence associations
+## Table of FDR < 0.1 prevalence associations
 
 ```{r}
-pathway_differences_in_WildR_mice.maaslin3_curated$prevalence %>% 
+WildR_vs_SPF_adj_Sex.maaslin3$fit_data_prevalence$results %>% 
   filter(qval_individual < 0.1, is.na(error), value == "WildR") %>% 
   arrange(desc(abs(coef))) %>% 
   select(-metadata, -value) %>% 
@@ -377,12 +441,12 @@ pathway_differences_in_WildR_mice.maaslin3_curated$prevalence %>%
   )
 ```
 
-## Differentially abundant pathways
+# Differentially abundant taxa in sex-adjusted model
 
-### P-value and FDR histograms
+## P-value and FDR histograms
 
 ```{r, fig.width=8, fig.height=5}
-pval_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$abundance %>% filter(
+pval_histogram <- WildR_vs_SPF_adj_Sex.maaslin3$fit_data_abundance$results %>% filter(
   value == "WildR"
 ) %>% 
   ggplot(aes(x = pval_individual)) + 
@@ -391,7 +455,7 @@ pval_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$abundance %
     title = "P-value (individual)"
   )
 
-FDR_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$abundance %>% filter(
+FDR_histogram <- WildR_vs_SPF_adj_Sex.maaslin3$fit_data_abundance$results %>% filter(
   value == "WildR"
 ) %>% 
   ggplot(aes(x = qval_individual)) + 
@@ -403,10 +467,10 @@ FDR_histogram <- pathway_differences_in_WildR_mice.maaslin3_curated$abundance %>
 ggarrange(pval_histogram, FDR_histogram)
 ```
 
-### Table of FDR < 0.1 abundance associations
+## Table of FDR < 0.1 abundance associations
 
 ```{r}
-pathway_differences_in_WildR_mice.maaslin3_curated$abundance %>% 
+WildR_vs_SPF_adj_Sex.maaslin3$fit_data_abundance$results %>% 
   filter(qval_individual < 0.1, is.na(error), value == "WildR") %>% 
   arrange(desc(abs(coef))) %>% 
   select(-metadata, -value) %>% 
@@ -420,17 +484,16 @@ pathway_differences_in_WildR_mice.maaslin3_curated$abundance %>%
 As it often happens with pathway analyses, there are MANY statistical 
 associations.
 
-
-# Pathways table per microbiome type
+# taxa table per microbiome type in sex-adjusted model
 
 ```{r}
 InputHumannData.tse %>% 
-  meltSE(assay.type = "pathway_abundance_unstratified", add.col = c("donor_microbiome_type")) %>% 
+  meltSE(assay.type = params$assayTested, add.col = c("donor_microbiome_type")) %>% 
   group_by(FeatureID, donor_microbiome_type) %>% 
   reframe(
     N = n(),
-    N_not_0 = sum(pathway_abundance_unstratified > 0),
-    mean_abund = mean(pathway_abundance_unstratified)
+    N_not_0 = sum(!!sym(params$assayTested) > 0),
+    mean_abund = mean(!!sym(params$assayTested))
   ) %>% 
   pivot_wider(names_from = "donor_microbiome_type", values_from = c("N", "N_not_0", "mean_abund")) %>% 
   DT::datatable(
@@ -445,4 +508,3 @@ InputHumannData.tse %>%
 ```{r}
 sessionInfo()
 ```
-
