@@ -1,0 +1,474 @@
+---
+title: "Functional differences between wild mice microbiome and SPF in ASO mice"
+subtitle: "Data: MetaPhlAn4 profiles"
+author: "Daniel Dumitrescu, Giacomo Antonello, Nicola Segata, Levi Waldron, Sarkis Mazmanian"
+date: "`r Sys.Date()`"
+output:
+  rmdformats::readthedown:
+    self_contained: true
+    toc_depth: 3
+    code_folding: hide
+    toc_float: true
+    number_sections: true
+    thumbnails: false
+    lightbox: true
+    gallery: false
+    use_bookdown: true
+    highlight: haddock
+params:
+  basic_outdir: "results"
+  microbiome_basic_transform: "metaphlan_RelAbund"
+  microbiome_data_type: "SGB"
+  beta_dist: "bray"
+  beta_MDS: "MDS"
+---
+
+```{r}
+knitr::opts_chunk$set(warning = FALSE, message = FALSE)
+```
+
+```{r, include=FALSE}
+# packages for tabular data manipulation
+library(tidyverse)
+library(data.table)
+
+# microbiome specific packages
+library(maaslin3)
+library(mia)
+# some packages for data visualization (plots and tables)
+library(miaViz)
+library(pheatmap)
+library(UpSetR)
+library(ggpubr)
+library(kableExtra)
+library(reactable)
+
+# MAC's package to download data
+library(parkinsonsMetagenomicData) # devtools::install_github("ASAP-MAC/parkinsonsMetagenomicData")
+library(biobakeryUtils) # devtools::install_github("g-antonello/biobakeryUtils")
+library(ggh4x) # for complex ggplot2 faceting
+# set ggplot2 plot themes 
+theme_set(theme_light())
+# set seed for reproducibility
+set.seed(1234)
+```
+
+# Create output directories all in one chunk
+
+```{r}
+
+output_directories.list <- list(
+  # alpha diversity directory
+  alpha_div_outdir = file.path(params$basic_outdir, params$microbiome_data_type, "01_alpha_diversity"),
+  # beta diversity output directory
+  beta_div_outdir = file.path(params$basic_outdir, params$microbiome_data_type, "02_beta_diversity")
+)
+
+tmp_out <- capture.output(sapply(output_directories.list, dir.create, showWarnings = FALSE, recursive = TRUE))
+rm(tmp_out)
+```
+
+# Load data for analysis
+
+```{r}
+InputMetaPhlAnData.tse <- read_TSE_from_dir("Data/MetaPhlAn.tse/")
+InputMetaPhlAnData.tse
+```
+
+# The vast majority of reads do not map to a pathway
+
+These features will be removed, because they are crushing the remaining taxa
+
+```{r, fig.height = 8, fig.width=12, fig.cap="Stack plot of the top 30 most abundant taxa, with highlight on the distribution of UNMAPPED and UNINTEGRATED reads."}
+topN_taxa <- getTop(InputMetaPhlAnData.tse, 20, assay.type = "metaphlan_RelAbund")
+colors_top2 <- rev(scater:::.get_palette(palette_name = "tableau10medium"))[1:2]
+
+stackplot_top_N <- InputMetaPhlAnData.tse[topN_taxa, ] %>% 
+  miaViz::plotAbundance(assay.type = "metaphlan_RelAbund") + 
+  theme(legend.position = "bottom") + 
+  facet_nested(cols = vars(sex, donor_microbiome_type), scales = "free_x")
+
+stackplot_top_N
+```
+
+```{r}
+alpha_indices <- c("dbp_dominance", "gini", "observed_richness", "shannon_diversity")
+InputMetaPhlAnData.tse <- addAlpha(InputMetaPhlAnData.tse, assay.type = "metaphlan_RelAbund", index = alpha_indices)
+
+tmp <- sapply(alpha_indices, function(div) {
+  lm(as.formula(paste(div, "~", "sex + donor_microbiome_type")), data = colData(InputMetaPhlAnData.tse))
+  
+}, USE.NAMES = TRUE, simplify = FALSE)
+
+table_results.df <- tmp %>% lapply(broom::tidy) %>% 
+  bind_rows(.id = "AlphaIndex") %>% 
+  filter(!grepl("Intercept", term))
+
+table_results.df %>%
+  kbl() %>% 
+  row_spec(which(table_results.df$p.value < 0.05), bold = TRUE) %>% 
+  kable_styling()
+```
+
+WildR microbiomes show more taxa and minimally more evenly distributed 
+abundances of such taxa.
+
+# Compositional differences in relation to the donor microbiome
+
+```{r}
+dimRedName <- paste(params$beta_dist, "mds", sep = "_")
+# this will work once mia or TreeSummarizedExperiment fixes some things
+InputMetaPhlAnData.tse <- mia::addMDS(
+  InputMetaPhlAnData.tse,
+  assay.type = "metaphlan_RelAbund",
+  method = params$beta_dist,
+  ncomponents = 3, name = dimRedName
+  )
+
+variances_explained <- attr(reducedDim(InputMetaPhlAnData.tse, dimRedName), "eig")
+prop_variances_explained <- variances_explained/sum(variances_explained)
+
+mds_data_for_plot.df <- cbind.data.frame(as.data.frame(colData(InputMetaPhlAnData.tse)), reducedDim(InputMetaPhlAnData.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
+
+beta_plot_all_features <- mds_data_for_plot.df %>% 
+  ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = paste(donor_microbiome_type, sex))) + 
+  geom_point(size = 2) + 
+  stat_ellipse(show.legend = FALSE) + 
+  #scale_color_manual(values = ggsci::pal_jco()(6)) +
+  theme(legend.position = "top") +
+  labs(color = "Sex and Microbiome",
+       x = paste0("MDS 1 [", round(prop_variances_explained[1]*100, 1), "%]"),
+       y = paste0("MDS 2 [", round(prop_variances_explained[2]*100, 2), "%]")
+  )
+
+```
+
+```{r}
+dimRedName <- paste(params$beta_dist, "mds", "no_UN.", sep = "_")
+# this will work once mia or TreeSummarizedExperiment fixes some things
+
+InputMetaPhlAnData_noUN.tse <- mia::addMDS(
+  InputMetaPhlAnData.tse[!startsWith(rownames(InputMetaPhlAnData.tse), "t__UN"),],
+  assay.type = "metaphlan_RelAbund",
+  method = params$beta_dist,
+  ncomponents = 3, name = dimRedName
+  )
+
+variances_explained <- attr(reducedDim(InputMetaPhlAnData_noUN.tse, dimRedName), "eig")
+prop_variances_explained <- variances_explained/sum(variances_explained)
+
+mds_data_for_plot.df <- cbind.data.frame(as.data.frame(colData(InputMetaPhlAnData_noUN.tse)), reducedDim(InputMetaPhlAnData_noUN.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
+
+beta_plot_no_UNINT_UNMAP <- mds_data_for_plot.df %>% 
+  ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = paste(donor_microbiome_type, sex))) + 
+  geom_point(size = 2) + 
+  stat_ellipse(show.legend = FALSE) + 
+  #scale_color_manual(values = ggsci::pal_jco()(6)) +
+  theme(legend.position = "top") +
+  labs(color = "Sex and Microbiome",
+       x = paste0("MDS 1 [", round(prop_variances_explained[1]*100, 1), "%]"),
+       y = paste0("MDS 2 [", round(prop_variances_explained[2]*100, 2), "%]")
+  )
+
+```
+
+```{r}
+ggsave(plot = beta_plot_all_features, filename = file.path(output_directories.list$beta_div_outdir, "bray_MDS_plot_all_features.png"), dpi = 600, height = 7.5, width = 6)
+ggsave(plot = beta_plot_no_UNINT_UNMAP, filename = file.path(output_directories.list$beta_div_outdir, "bray_MDS_plot_no_UNMAP_UNINT.png"), dpi = 600, height = 7.5, width = 6)
+
+ggarrange(beta_plot_all_features + labs(title = "All Features"),
+          beta_plot_no_UNINT_UNMAP + labs(title = "All except t__UNCLASS."),
+          common.legend = TRUE)
+```
+
+## PERMANOVA statistics on data without UN* features
+
+```{r}
+
+InputMetaPhlAnData_noUN.tse <- addPERMANOVA(
+  InputMetaPhlAnData_noUN.tse,
+  assay.type = "metaphlan_RelAbund",
+  method = "bray",
+  formula = x ~ sex + donor_microbiome_type,
+  name = "permanova",
+  permutations = 999,
+  test.homogeneity = TRUE
+)
+
+permanova_table.df <- PERMANOVA_to_table(InputMetaPhlAnData_noUN.tse)
+
+write_tsv(permanova_table.df, file = file.path(output_directories.list$beta_div_outdir, paste(params$beta_dist, "adonisPermanova", "sex", "donor_microbiome_type.tsv", sep = "_")))
+```
+
+```{r}
+permanova_table.df %>% 
+  kbl() %>% 
+  kable_styling()
+```
+
+## Unsupervised heatmap of all taxa show 4 WildR mice with SPF-like microbiomes
+
+And they do not belong to one specific cage
+
+```{r, fig.height=8, fig.width=10}
+pheatmap::pheatmap(assay(InputMetaPhlAnData.tse, "metaphlan_RelAbund") %>% magrittr::set_colnames(colData(InputMetaPhlAnData.tse)$sample_name), scale = "row", annotation_col = colData(InputMetaPhlAnData.tse) %>% as.data.frame() %>%  magrittr::set_rownames(.$sample_name) %>% select(sex, donor_microbiome_type, cage), angle_col = 315, show_rownames = FALSE)
+```
+
+# Differentially abundant taxa in `WildR` mice compared to SPF
+
+## Sex adjusted
+
+$$
+\log_2(Pathway) \sim sex + \text{donor_microbiome_type}
+$$
+
+```{r}
+# prepare input data
+
+tmp.tse <- InputMetaPhlAnData.tse
+tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
+tmp.tse
+
+# define experiment name and output directories
+maaslin3_expmt <- "WildR_vs_SPF_adj_sex"
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
+# create definitive output directory
+dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
+```
+
+Results are stored in ``r maaslin3_final_outdir``
+
+```{r}
+set.seed(1234)
+WildR_vs_SPF_adj_Sex.maaslin3 <- maaslin3(
+    input_data = tmp.tse,
+    formula = ~ sex + donor_microbiome_type, 
+    transform = "LOG",
+    output = maaslin3_final_outdir,
+    # do not standardize continuous metadata variables in the model
+    standardize = FALSE,
+    plot_associations = FALSE,
+    save_plots_rds = TRUE,
+		verbosity = "ERROR"
+  )
+
+## add taxonomy to output tables: all_results.tsv
+dplyr::full_join(as.data.frame(rowData(tmp.tse)), read_tsv(file.path(maaslin3_final_outdir, "all_results.tsv")) %>% dplyr::rename(!!params$microbiome_data_type := feature), by = params$microbiome_data_type) %>% 
+  #arrange again based on increasing qval_individual
+  arrange(qval_individual) %>% 
+  write_tsv(file.path(maaslin3_final_outdir, "all_results.tsv")) 
+
+## add taxonomy to output tables: significant_results.tsv
+dplyr::full_join(as.data.frame(rowData(tmp.tse)), read_tsv(file.path(maaslin3_final_outdir, "significant_results.tsv")) %>% dplyr::rename(!!params$microbiome_data_type := feature), by = params$microbiome_data_type) %>% 
+  write_tsv(file.path(maaslin3_final_outdir, "significant_results.tsv")) 
+
+# save raw output
+saveRDS(WildR_vs_SPF_adj_Sex.maaslin3, file = file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
+```
+
+```{r, fig.height=10, fig.width=12}
+readRDS(file.path(maaslin3_final_outdir, "figures", "summary_plot_gg.RDS"))
+```
+
+## Males
+
+```{r}
+# prepare input data
+
+tmp.tse <- InputMetaPhlAnData.tse[,colData(InputMetaPhlAnData.tse)$sex == "Male"]
+tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
+tmp.tse
+
+# define experiment name and output directories
+maaslin3_expmt <- "WildR_vs_SPF_Males"
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
+# create definitive output directory
+dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
+```
+
+Results are stored in ``r maaslin3_final_outdir``
+
+```{r}
+set.seed(1234)
+WildR_vs_SPF_Males.maaslin3 <- maaslin3(
+    input_data = tmp.tse,
+    formula = ~ donor_microbiome_type, 
+    transform = "LOG",
+    output = maaslin3_final_outdir,
+    # do not standardize continuous metadata variables in the model
+    standardize = FALSE,
+    plot_associations = FALSE,
+    save_plots_rds = TRUE,
+		verbosity = "ERROR"
+  )
+
+## add taxonomy to output tables: all_results.tsv
+dplyr::full_join(as.data.frame(rowData(tmp.tse)), read_tsv(file.path(maaslin3_final_outdir, "all_results.tsv")) %>% dplyr::rename(!!params$microbiome_data_type := feature), by = params$microbiome_data_type) %>% 
+  #arrange again based on increasing qval_individual
+  arrange(qval_individual) %>% 
+  write_tsv(file.path(maaslin3_final_outdir, "all_results.tsv")) 
+
+## add taxonomy to output tables: significant_results.tsv
+dplyr::full_join(as.data.frame(rowData(tmp.tse)), read_tsv(file.path(maaslin3_final_outdir, "significant_results.tsv")) %>% dplyr::rename(!!params$microbiome_data_type := feature), by = params$microbiome_data_type) %>% 
+  write_tsv(file.path(maaslin3_final_outdir, "significant_results.tsv")) 
+
+# save raw output
+saveRDS(WildR_vs_SPF_adj_Sex.maaslin3, file = file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
+```
+
+## Females
+
+```{r}
+# prepare input data
+
+tmp.tse <- InputMetaPhlAnData.tse[,colData(InputMetaPhlAnData.tse)$sex == "Female"]
+tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
+tmp.tse
+
+# define experiment name and output directories
+maaslin3_expmt <- "WildR_vs_SPF_Females"
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
+# create definitive output directory
+dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
+```
+
+Results are stored in ``r maaslin3_final_outdir``
+
+```{r}
+set.seed(1234)
+WildR_vs_SPF_Females.maaslin3 <- invisible(maaslin3(
+    input_data = tmp.tse,
+    formula = ~ donor_microbiome_type, 
+    transform = "LOG",
+    output = maaslin3_final_outdir,
+    # do not standardize continuous metadata variables in the model
+    standardize = FALSE,
+    plot_associations = FALSE,
+    save_plots_rds = TRUE,
+		verbosity = "ERROR"
+  ))
+
+## add taxonomy to output tables: all_results.tsv
+dplyr::full_join(as.data.frame(rowData(tmp.tse)), read_tsv(file.path(maaslin3_final_outdir, "all_results.tsv")) %>% dplyr::rename(!!params$microbiome_data_type := feature), by = params$microbiome_data_type) %>% 
+  #arrange again based on increasing qval_individual
+  arrange(qval_individual) %>% 
+  write_tsv(file.path(maaslin3_final_outdir, "all_results.tsv")) 
+
+## add taxonomy to output tables: significant_results.tsv
+dplyr::full_join(as.data.frame(rowData(tmp.tse)), read_tsv(file.path(maaslin3_final_outdir, "significant_results.tsv")) %>% dplyr::rename(!!params$microbiome_data_type := feature), by = params$microbiome_data_type) %>% 
+  write_tsv(file.path(maaslin3_final_outdir, "significant_results.tsv")) 
+
+# save raw output
+saveRDS(WildR_vs_SPF_adj_Sex.maaslin3, file = file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
+```
+
+# Differentially prevalent taxa in sex-adjusted model
+
+## P-value and FDR histograms
+
+```{r, fig.width=8, fig.height=5}
+pval_histogram <- WildR_vs_SPF_adj_Sex.maaslin3$fit_data_prevalence$results %>% 
+  filter(
+    value == "WildR"
+    ) %>% 
+  ggplot(aes(x = pval_individual)) + 
+  geom_histogram() +
+  labs(
+    title = "P-value (individual)"
+  )
+
+FDR_histogram <- WildR_vs_SPF_adj_Sex.maaslin3$fit_data_prevalence$results %>% 
+  filter(
+    value == "WildR"
+  ) %>% 
+  ggplot(aes(x = qval_individual)) + 
+  geom_histogram() +
+  labs(
+    title = "FDR (individual)"
+    )
+
+ggarrange(pval_histogram, FDR_histogram)
+```
+
+## Table of FDR < 0.1 prevalence associations
+
+```{r}
+WildR_vs_SPF_adj_Sex.maaslin3$fit_data_prevalence$results %>% 
+  filter(qval_individual < 0.1, is.na(error), value == "WildR") %>% 
+  arrange(desc(abs(coef))) %>% 
+  select(-metadata, -value) %>% 
+  DT::datatable(
+     extensions = "Buttons",
+    options = list(dom = "Bfrtip",
+                   buttons = c('copy', 'csv', 'excel', 'pdf'))
+  )
+```
+
+# Differentially abundant taxa in sex-adjusted model
+
+## P-value and FDR histograms
+
+```{r, fig.width=8, fig.height=5}
+pval_histogram <- WildR_vs_SPF_adj_Sex.maaslin3$fit_data_abundance$results %>% filter(
+  value == "WildR"
+) %>% 
+  ggplot(aes(x = pval_individual)) + 
+  geom_histogram() +
+  labs(
+    title = "P-value (individual)"
+  )
+
+FDR_histogram <- WildR_vs_SPF_adj_Sex.maaslin3$fit_data_abundance$results %>% filter(
+  value == "WildR"
+) %>% 
+  ggplot(aes(x = qval_individual)) + 
+  geom_histogram() +
+  labs(
+    title = "FDR (individual)"
+    )
+
+ggarrange(pval_histogram, FDR_histogram)
+```
+
+## Table of FDR < 0.1 abundance associations
+
+```{r}
+WildR_vs_SPF_adj_Sex.maaslin3$fit_data_abundance$results %>% 
+  filter(qval_individual < 0.1, is.na(error), value == "WildR") %>% 
+  arrange(desc(abs(coef))) %>% 
+  select(-metadata, -value) %>% 
+  DT::datatable(
+     extensions = "Buttons",
+    options = list(dom = "Bfrtip",
+                   buttons = c('copy', 'csv', 'excel', 'pdf'))
+  )
+```
+
+As it often happens with pathway analyses, there are MANY statistical 
+associations.
+
+# taxa table per microbiome type in sex-adjusted model
+
+```{r}
+InputMetaPhlAnData.tse %>% 
+  meltSE(assay.type = "metaphlan_RelAbund", add.col = c("donor_microbiome_type")) %>% 
+  group_by(FeatureID, donor_microbiome_type) %>% 
+  reframe(
+    N = n(),
+    N_not_0 = sum(metaphlan_RelAbund > 0),
+    mean_abund = mean(metaphlan_RelAbund)
+  ) %>% 
+  pivot_wider(names_from = "donor_microbiome_type", values_from = c("N", "N_not_0", "mean_abund")) %>% 
+  DT::datatable(
+     extensions = "Buttons",
+    options = list(dom = "Bfrtip",
+                   buttons = c('copy', 'csv', 'excel', 'pdf'))
+  )
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
+```
+
