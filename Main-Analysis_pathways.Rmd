@@ -17,7 +17,7 @@ output:
     highlight: haddock
 params:
   basic_outdir: "results"
-  microbiome_basic_transform: "RelAbund"
+  microbiome_basic_transform: "gene_family_abundance_rpk_relab_unstratified"
   humann_data_type: "pathways"
   beta_dist: "bray"
   beta_MDS: "MDS"
@@ -61,78 +61,17 @@ output_directories.list <- list(
   # alpha diversity directory
   alpha_div_outdir = file.path(params$basic_outdir, params$humann_data_type, "01_alpha_diversity"),
   # beta diversity output directory
-  beta_div_outdir = file.path(params$basic_outdir, params$humann_data_type, "02_beta_diversity"),
-  # differential abundance temporary directory
-  maaslin_tmpdir = "~/Documents/maaslin3_tmp_results/mazmanian_Danny"
+  beta_div_outdir = file.path(params$basic_outdir, params$humann_data_type, "02_beta_diversity")
 )
 
 tmp_out <- capture.output(sapply(output_directories.list, dir.create, showWarnings = FALSE, recursive = TRUE))
 rm(tmp_out)
 ```
 
-# Prepare data for analysis
-
-THis is run only if interactive to avoid careless overwriting
-
-```{r, eval=interactive(), message=FALSE}
-
-# Load metadata
-metadata.df <- read_tsv("Data/metadata_4.0.tsv") %>% 
-  # format a few values in the metadata
-  mutate(
-    sex = as.factor(sex),
-    cage = as.factor(cage),
-    donor_microbiome_type = factor(donor_microbiome_type, levels = c("SPF", "WildR")),
-    ) %>% 
-  as.data.frame()
-
-rownames(metadata.df) <- metadata.df$uuid
-
-googleCloudStorageR::gcs_auth(json_file = "~/Downloads/curatedmetagenomicdata-232f4a306d1d.json")
-
-# HUMAnN_3.9 pathway abundance unstratified
-humann_unstrat_cache <- cacheMetagenomicData(metadata.df$uuid, data_type = "pathabundance_unstratified", redownload = "no")
-
-# mpa_cache <- cacheMetagenomicData(metadata.df$uuid, data_type = "relative_abundance", redownload = "no") %>% 
-#   # retrieve reads per sample too
-#   mutate(n_reads_processed = get_reads_processed(cache_path))
-
-humann_unstrat.se <- loadMetagenomicData(humann_unstrat_cache)
-pathways_raw <- rownames(humann_unstrat.se)
-# make initial rowData
-rowData.df <- DataFrame(
-  MetaCyc_code = sapply(strsplit(rownames(humann_unstrat.se), "\\:\\ "), "[", 1),
-  MetaCyc_longer_name = sapply(strsplit(rownames(humann_unstrat.se), "\\:\\ "), "[", 2),
-  full_name = rownames(humann_unstrat.se), 
-  row.names = rownames(humann_unstrat.se))
-# fix NA in longer_name because of UNMAPPED/UNINTEGRATED
-rowData.df$MetaCyc_longer_name[is.na(rowData.df$MetaCyc_longer_name)] <- rowData.df$full_name[is.na(rowData.df$MetaCyc_longer_name)]
-# assign rowData
-rowData(humann_unstrat.se) <- rowData.df
-# identical(metadata.df$uuid, colnames(humann_unstrat.se)) # TRUE
-
-
-# Create a de novo TreeSummarizedExperiment
-InputHumannData.tse <- TreeSummarizedExperiment(
-  list("AbsAbund" = assay(humann_unstrat.se), 
-       "AbsAbund_round" = round(assay(humann_unstrat.se), 0),
-       "RelAbund" = apply(assay(humann_unstrat.se), 2, function(x) x/sum(x))
-       ),
-  rowData = rowData.df, 
-  colData =  DataFrame(metadata.df))
-
-# save this TSE object
-dir.create("Data/humann_data", recursive = TRUE, showWarnings = FALSE)
-write_tsv(as.data.frame(assay(InputHumannData.tse, "AbsAbund")) %>% rownames_to_column("pathway"), "Data/humann_data/humann3.9_unstratified_AbsCounts_raw.tsv")
-
-
-
-saveRDS(InputHumannData.tse, "Data/InputHumannData.tse.Rds")
-
-```
+# Load data for analysis
 
 ```{r}
-InputHumannData.tse <- readRDS("Data/InputHumannData.tse.Rds")
+InputHumannData.tse <- read_TSE_from_dir("Data/HUMAnN_pathways_unstratified.tse")
 InputHumannData.tse
 ```
 
@@ -140,18 +79,17 @@ InputHumannData.tse
 
 These features will be removed, because they are crushing the remaining pathways
 
-
 ```{r, fig.height = 8, fig.width=12, fig.cap="Stack plot of the top 30 most abundant pathways, with highlight on the distribution of UNMAPPED and UNINTEGRATED reads."}
-topN_pwys <- getTop(InputHumannData.tse, 20, assay.type = "RelAbund")
+topN_pwys <- getTop(InputHumannData.tse, 20, assay.type = "gene_family_abundance_rpk_relab_unstratified")
 colors_top2 <- rev(scater:::.get_palette(palette_name = "tableau10medium"))[1:2]
 stackplot_top_N <- InputHumannData.tse[topN_pwys, ] %>% 
-  miaViz::plotAbundance(assay.type = "RelAbund") + 
+  miaViz::plotAbundance(assay.type = "gene_family_abundance_rpk_relab_unstratified") + 
   theme(legend.position = "bottom")
 
-hist_unmapped <- ggplot(data.frame(UNMAPPED = assay(InputHumannData.tse, "RelAbund")["UNMAPPED", ]), aes(x = UNMAPPED)) + 
+hist_unmapped <- ggplot(data.frame(UNMAPPED = assay(InputHumannData.tse, "gene_family_abundance_rpk_relab_unstratified")["UNMAPPED", ]), aes(x = UNMAPPED)) + 
   geom_histogram(binwidth = 0.01, fill = colors_top2[1], alpha = 0.65)
 
-hist_unintegrated <- ggplot(data.frame(UNINTEGRATED = assay(InputHumannData.tse, "RelAbund")["UNINTEGRATED", ]), aes(x = UNINTEGRATED)) + 
+hist_unintegrated <- ggplot(data.frame(UNINTEGRATED = assay(InputHumannData.tse, "gene_family_abundance_rpk_relab_unstratified")["UNINTEGRATED", ]), aes(x = UNINTEGRATED)) + 
   geom_histogram(binwidth = 0.01,  fill = colors_top2[2], alpha = 0.65)
 
 ggarrange(stackplot_top_N, ggarrange(hist_unmapped, hist_unintegrated, nrow = 1, ncol = 2), nrow = 2, ncol = 1, common.legend = TRUE, legend = "bottom")
@@ -161,18 +99,18 @@ ggarrange(stackplot_top_N, ggarrange(hist_unmapped, hist_unintegrated, nrow = 1,
 
 ```{r}
 
-stats_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = "RelAbund", add.col = c("sex", "donor_microbiome_type")) %>% 
+stats_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = "gene_family_abundance_rpk_relab_unstratified", add.col = c("sex", "donor_microbiome_type")) %>% 
   filter(grepl("^UN", FeatureID)) %>% 
   group_by(FeatureID) %>% 
   nest() %>% 
   mutate(
-    model = map(data, ~broom::tidy(lm(RelAbund ~ sex + donor_microbiome_type, data = .x)))
+    model = map(data, ~broom::tidy(lm(gene_family_abundance_rpk_relab_unstratified ~ sex + donor_microbiome_type, data = .x)))
   ) %>% 
   unnest(model)
 
-plot_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = "RelAbund", add.col = c("sex", "donor_microbiome_type")) %>% 
+plot_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = "gene_family_abundance_rpk_relab_unstratified", add.col = c("sex", "donor_microbiome_type")) %>% 
   filter(grepl("^UN", FeatureID)) %>% 
-  ggplot(aes(x = sex, y = RelAbund, color = donor_microbiome_type)) + 
+  ggplot(aes(x = sex, y = gene_family_abundance_rpk_relab_unstratified, color = donor_microbiome_type)) + 
   geom_boxplot(width = 0.3) +
   geom_point(position = position_jitterdodge(jitter.width = 0.2, seed = 1234)) +
   facet_wrap(~FeatureID) + 
@@ -208,7 +146,7 @@ if the unintegrated fraction is higher, unmapped reads will have to be less.
 
 ```{r}
 InputHumannData.tse[grepl("^UN", rownames(InputHumannData.tse)),] %>% 
-  assay("RelAbund") %>%
+  assay("gene_family_abundance_rpk_relab_unstratified") %>%
   t() %>% 
   cor()
 ```
@@ -223,7 +161,7 @@ gene families. This confirms that
 
 ```{r}
 alpha_indices <- c("dbp_dominance", "gini", "observed_richness", "shannon_diversity")
-InputHumannData.tse <- addAlpha(InputHumannData.tse, assay.type = "RelAbund", index = alpha_indices)
+InputHumannData.tse <- addAlpha(InputHumannData.tse, assay.type = "gene_family_abundance_rpk_relab_unstratified", index = alpha_indices)
 
 tmp <- sapply(alpha_indices, function(div) {
   lm(as.formula(paste(div, "~", "sex + donor_microbiome_type")), data = colData(InputHumannData.tse))
@@ -241,34 +179,27 @@ table_results.df %>%
 ```
 
 WildR microbiomes show more pathways and minimally more evenly distributed 
-abundances of such pathways. 
+abundances of such pathways.
 
 # Compositional differences in relation to the donor microbiome
 
 ```{r}
-InputHumannData_noUN_rescaled.tse <- InputHumannData.tse[!grepl("^UN", rownames(InputHumannData.tse)),]
-InputHumannData_noUN_rescaled.tse <- transformAssay(InputHumannData_noUN_rescaled.tse, assay.type = "RelAbund", method = "relabundance", name = "RelAbund_rescaled")
-
-InputHumannData_noUN_rescaled.tse
-```
-
-```{r}
 dimRedName <- paste(params$beta_dist, "mds", sep = "_")
 # this will work once mia or TreeSummarizedExperiment fixes some things
-InputHumannData_noUN_rescaled.tse <- mia::addMDS(
-  InputHumannData_noUN_rescaled.tse,
-  assay.type = "RelAbund",
+InputHumannData.tse <- mia::addMDS(
+  InputHumannData.tse,
+  assay.type = "gene_family_abundance_rpk_relab_unstratified",
   method = params$beta_dist,
   ncomponents = 3, name = dimRedName
   )
 
-variances_explained <- attr(reducedDim(InputHumannData_noUN_rescaled.tse, dimRedName), "eig")
+variances_explained <- attr(reducedDim(InputHumannData.tse, dimRedName), "eig")
 prop_variances_explained <- variances_explained/sum(variances_explained)
 
-project1_meta_with_MDS.df <- cbind.data.frame(as.data.frame(colData(InputHumannData_noUN_rescaled.tse)), reducedDim(InputHumannData_noUN_rescaled.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
+mds_data_for_plot.df <- cbind.data.frame(as.data.frame(colData(InputHumannData.tse)), reducedDim(InputHumannData.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
 
-beta_plot_basic <- project1_meta_with_MDS.df %>% 
-  ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = paste(sex, donor_microbiome_type))) + 
+beta_plot_all_features <- mds_data_for_plot.df %>% 
+  ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = paste(donor_microbiome_type, sex))) + 
   geom_point(size = 2) + 
   stat_ellipse(show.legend = FALSE) + 
   #scale_color_manual(values = ggsci::pal_jco()(6)) +
@@ -281,18 +212,49 @@ beta_plot_basic <- project1_meta_with_MDS.df %>%
 ```
 
 ```{r}
-ggsave(plot = beta_plot_basic, filename = file.path(output_directories.list$beta_div_outdir, "bray_MDS_plot.png"), dpi = 600, height = 7.5, width = 6)
+dimRedName <- paste(params$beta_dist, "mds", "no_UN.", sep = "_")
+# this will work once mia or TreeSummarizedExperiment fixes some things
+InputHumannData.tse <- mia::addMDS(
+  InputHumannData.tse[!startsWith(rownames(InputHumannData.tse), "UN"),],
+  assay.type = "gene_family_abundance_rpk_relab_unstratified",
+  method = params$beta_dist,
+  ncomponents = 3, name = dimRedName
+  )
 
-beta_plot_basic
+variances_explained <- attr(reducedDim(InputHumannData.tse, dimRedName), "eig")
+prop_variances_explained <- variances_explained/sum(variances_explained)
+
+mds_data_for_plot.df <- cbind.data.frame(as.data.frame(colData(InputHumannData.tse)), reducedDim(InputHumannData.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
+
+beta_plot_no_UNINT_UNMAP <- mds_data_for_plot.df %>% 
+  ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = paste(donor_microbiome_type, sex))) + 
+  geom_point(size = 2) + 
+  stat_ellipse(show.legend = FALSE) + 
+  #scale_color_manual(values = ggsci::pal_jco()(6)) +
+  theme(legend.position = "top") +
+  labs(color = "Sex and Microbiome",
+       x = paste0("MDS 1 [", round(prop_variances_explained[1]*100, 1), "%]"),
+       y = paste0("MDS 2 [", round(prop_variances_explained[2]*100, 2), "%]")
+  )
+
+```
+
+```{r}
+ggsave(plot = beta_plot_all_features, filename = file.path(output_directories.list$beta_div_outdir, "bray_MDS_plot_all_features.png"), dpi = 600, height = 7.5, width = 6)
+ggsave(plot = beta_plot_no_UNINT_UNMAP, filename = file.path(output_directories.list$beta_div_outdir, "bray_MDS_plot_no_UNMAP_UNINT.png"), dpi = 600, height = 7.5, width = 6)
+
+ggarrange(beta_plot_all_features + labs(title = "All Features"),
+          beta_plot_no_UNINT_UNMAP + labs(title = "All except UNINTEGR. and UNMAPP."),
+          common.legend = TRUE)
 ```
 
 ## PERMANOVA statistics
 
 ```{r}
 
-InputHumannData_noUN_rescaled.tse <- addPERMANOVA(
-  InputHumannData_noUN_rescaled.tse,
-  assay.type = "RelAbund",
+InputHumannData.tse <- addPERMANOVA(
+  InputHumannData.tse,
+  assay.type = "gene_family_abundance_rpk_relab_unstratified",
   method = "bray",
   formula = x ~ sex + donor_microbiome_type,
   name = "permanova",
@@ -300,7 +262,7 @@ InputHumannData_noUN_rescaled.tse <- addPERMANOVA(
   test.homogeneity = TRUE
 )
 
-permanova_table.df <- PERMANOVA_to_table(InputHumannData_noUN_rescaled.tse)
+permanova_table.df <- PERMANOVA_to_table(InputHumannData.tse)
 
 write_tsv(permanova_table.df, file = file.path(output_directories.list$beta_div_outdir, paste(params$beta_dist, "adonisPermanova", "sex", "donor_microbiome_type.tsv", sep = "_")))
 ```
@@ -315,8 +277,8 @@ permanova_table.df %>%
 
 And they do not belong to one specific cage
 
-```{r}
-pheatmap::pheatmap(assay(InputHumannData_noUN_rescaled.tse, "RelAbund") %>% magrittr::set_colnames(colData(InputHumannData_noUN_rescaled.tse)$sample_name), scale = "row", annotation_col = colData(InputHumannData_noUN_rescaled.tse) %>% as.data.frame() %>%  magrittr::set_rownames(.$sample_name) %>% select(sex, donor_microbiome_type, cage), angle_col = 315, show_rownames = FALSE)
+```{r, fig.height=8, fig.width=10}
+pheatmap::pheatmap(assay(InputHumannData.tse, "gene_family_abundance_rpk_relab_unstratified") %>% magrittr::set_colnames(colData(InputHumannData.tse)$sample_name), scale = "row", annotation_col = colData(InputHumannData.tse) %>% as.data.frame() %>%  magrittr::set_rownames(.$sample_name) %>% select(sex, donor_microbiome_type, cage), angle_col = 315, show_rownames = FALSE)
 ```
 
 # Differentially abundant pathways in `WildR` mice compared to SPF
@@ -328,16 +290,13 @@ $$
 ```{r}
 # prepare input data
 
-tmp.tse <- InputHumannData_noUN_rescaled.tse
+tmp.tse <- InputHumannData.tse
 tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
 tmp.tse
 
 # define experiment name and output directories
 maaslin3_expmt <- "WildR_vs_SPD_adj_sex"
-maaslin3_tmp_outdir <- file.path(output_directories.list$maaslin_tmpdir,  maaslin3_expmt)
 maaslin3_final_outdir <- file.path(params$basic_outdir, params$humann_data_type, maaslin3_expmt)
-# crate temporary output directory
-dir.create(maaslin3_tmp_outdir, showWarnings = FALSE, recursive = TRUE)
 # create definitive output directory
 dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
 ```
@@ -351,7 +310,7 @@ pathway_differences_in_WildR_mice.maaslin3 <- maaslin3(
     formula = ~ sex + donor_microbiome_type, 
     transform = "LOG", 
     normalization = "TSS",
-    output = maaslin3_tmp_outdir,
+    output = maaslin3_final_outdir,
     # do not standardize continuous metadata variables in the model
     standardize = FALSE,
     plot_associations = FALSE,
@@ -373,7 +332,7 @@ saveRDS(pathway_differences_in_WildR_mice.maaslin3, file = file.path(maaslin3_fi
 
 
 ```{r, fig.height=10, fig.width=16}
-readRDS(file.path(maaslin3_tmp_outdir, "figures", "summary_plot_gg.RDS"))
+readRDS(file.path(maaslin3_final_outdir, "figures", "summary_plot_gg.RDS"))
 ```
 
 ## Differentially prevalent pathways
@@ -465,13 +424,13 @@ associations.
 # Pathways table per microbiome type
 
 ```{r}
-InputHumannData_noUN_rescaled.tse %>% 
-  meltSE(assay.type = "RelAbund_rescaled", add.col = c("donor_microbiome_type")) %>% 
+InputHumannData.tse %>% 
+  meltSE(assay.type = "pathway_abundance_unstratified", add.col = c("donor_microbiome_type")) %>% 
   group_by(FeatureID, donor_microbiome_type) %>% 
   reframe(
     N = n(),
-    N_not_0 = sum(RelAbund_rescaled > 0),
-    mean_abund = mean(RelAbund_rescaled)
+    N_not_0 = sum(pathway_abundance_unstratified > 0),
+    mean_abund = mean(pathway_abundance_unstratified)
   ) %>% 
   pivot_wider(names_from = "donor_microbiome_type", values_from = c("N", "N_not_0", "mean_abund")) %>% 
   DT::datatable(
@@ -479,5 +438,11 @@ InputHumannData_noUN_rescaled.tse %>%
     options = list(dom = "Bfrtip",
                    buttons = c('copy', 'csv', 'excel', 'pdf'))
   )
+```
+
+# Session Info
+
+```{r}
+sessionInfo()
 ```
 
