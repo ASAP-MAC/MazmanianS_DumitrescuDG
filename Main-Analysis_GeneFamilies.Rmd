@@ -537,7 +537,7 @@ stopCluster(cl)
 then you need to read-in all results and bind them. it would be easier to `cat` 
 from bash.
 
-```{r}
+```{r, eval=FALSE}
 full_path <- file.path(getwd(), maaslin3_final_outdir)
 common_header <- read_tsv(file.path(maaslin3_final_outdir, "chunk.1", "all_results.tsv"), n_max = 1) %>% 
   colnames()
