@@ -17,8 +17,8 @@ output:
     highlight: haddock
 params:
   basic_outdir: "results"
-  microbiome_basic_transform: "RelAbund"
-  humann_data_type: "GeneFamilies"
+  assayTested: "gene_family_abundance_rpk_unstratified"
+  microbiome_data_type: "GeneFamilies"
   beta_dist: "bray"
   beta_MDS: "MDS"
 ---
@@ -27,13 +27,14 @@ params:
 knitr::opts_chunk$set(warning = FALSE, message = FALSE)
 ```
 
-```{r setup, include=FALSE}
+```{r, include=FALSE}
 # packages for tabular data manipulation
 library(tidyverse)
 library(data.table)
 
 # microbiome specific packages
 library(maaslin3)
+library(limma)
 library(mia)
 # some packages for data visualization (plots and tables)
 library(miaViz)
@@ -59,108 +60,187 @@ set.seed(1234)
 
 output_directories.list <- list(
   # alpha diversity directory
-  alpha_div_outdir = file.path(params$basic_outdir, params$humann_data_type, "01_alpha_diversity"),
+  alpha_div_outdir = file.path(params$basic_outdir, params$microbiome_data_type, "01_alpha_diversity"),
   # beta diversity output directory
-  beta_div_outdir = file.path(params$basic_outdir, params$humann_data_type, "02_beta_diversity")
+  beta_div_outdir = file.path(params$basic_outdir, params$microbiome_data_type, "02_beta_diversity")
 )
 
 tmp_out <- capture.output(sapply(output_directories.list, dir.create, showWarnings = FALSE, recursive = TRUE))
 rm(tmp_out)
 ```
 
-# Prepare data for analysis
+# Load data for analysis
 
 ```{r}
-HUMAnN_genefamilies_unstratified.tse <- read_TSE_from_dir("Data/HUMAnN_genefamilies_unstratified.tse/")
-HUMAnN_genefamilies_unstratified.tse
+InputHumannData.tse <- read_TSE_from_dir("Data/HUMAnN_genefamilies_unstratified.tse/")
+InputHumannData.tse
 ```
 
-# Richness of gene families per microbiome type
+# The vast majority of reads do not map to a pathway
 
-```{r, fig.cap = "Histrogram of alpha indices with test for normality under each plot"}
+These features will be removed, because they are crushing the remaining pathways
 
-alphaIndices <- c("dbp_dominance", "observed_richness", "shannon_diversity", "gini")
+```{r, fig.height = 8, fig.width=12, fig.cap="Stack plot of the top 30 most abundant pathways, with highlight on the distribution of UNMAPPED and UNINTEGRATED reads."}
+topN_features <- getTop(InputHumannData.tse, 20, assay.type = params$assayTested)
+colors_top2 <- rev(scater:::.get_palette(palette_name = "tableau10medium"))[1:2]
+stackplot_top_N <- InputHumannData.tse[topN_features, ] %>% 
+  miaViz::plotAbundance(assay.type = params$assayTested) + 
+  theme(legend.position = "bottom")+ 
+  facet_nested(cols = vars(sex, donor_microbiome_type), scales = "free_x")
 
-HUMAnN_genefamilies_unstratified.tse <- addAlpha(HUMAnN_genefamilies_unstratified.tse, assay.type = "gene_family_abundance_rpk_unstratified", index =  alphaIndices)
+stackplot_top_N
+```
 
-lapply(alphaIndices, 
-       function(div) {
-         stats_basic <- shapiro.test(as.data.frame(colData(HUMAnN_genefamilies_unstratified.tse))[[div]])
-         text <- paste0("Shapiro-Wilk test: W = ", round(stats_basic$statistic, 2), "; P-value = ", round(stats_basic$p.value, 3))
-         plot <- ggplot(as.data.frame(colData(HUMAnN_genefamilies_unstratified.tse)), aes(x = !!sym(div))) +
-           geom_histogram() + 
-           labs(
-             title = div, 
-             caption = text
-           )
-         
-         }
-       ) %>% 
-  ggarrange(plotlist = .)
+## UNMAPPED reads vary with Donor microbiome type
+
+```{r}
+
+stats_unintegr_unmapp <- meltSE(InputHumannData.tse, assay.type = params$assayTested, add.col = c("sex", "donor_microbiome_type")) %>% 
+  filter(grepl("^UN", FeatureID)) %>% 
+  group_by(FeatureID) %>% 
+  nest() %>% 
+  mutate(
+    model = map(data, ~broom::tidy(lm(!!sym(params$assayTested) ~ sex + donor_microbiome_type, data = .x)))
+  ) %>% 
+  unnest(model)
+
+plot_unintegr_unmapp <- meltSE(InputHumannData.tse[grepl("^UN", rownames(InputHumannData.tse)),], assay.type = params$assayTested, add.col = c("sex", "donor_microbiome_type")) %>% 
+  ggplot(aes(x = sex, y = !!sym(params$assayTested), color = donor_microbiome_type)) + 
+  geom_boxplot(width = 0.3, show.legend = FALSE) +
+  geom_point(position = position_jitterdodge(jitter.width = 0.2, seed = 1234)) +
+  facet_wrap(~FeatureID) + 
+  labs(
+    color = "Donor Microbiome"
+  ) + 
+  theme_bw() + 
+  theme(legend.position = "top") +
+  ggpubr::stat_compare_means(method = "t.test", show.legend = FALSE)
+```
+
+```{r}
+plot_unintegr_unmapp
+```
+
+```{r}
+stats_unintegr_unmapp %>% 
+  select(-data) %>% 
+  filter(grepl("donor_microbiome_type", term)) %>% 
+  kbl() %>% 
+  kable_styling()
+```
 
 
 ```
+UNMAPPED: Reads did not map to any gene/gene family
+UNINTEGRATED: Reads did map into a gene-gene family, BUT but that gene/gene family was not in the pathways database
+```
 
-```{r, tab.cap="Assessment of dependence of alpha diversity measures in relation to sequencing depth"}
-lm_alpha.list <- sapply(alphaIndices, function(div) {
-  lm(as.formula(paste(div, "~", "donor_microbiome_type + sex + number_reads")), data = as.data.frame(colData(HUMAnN_genefamilies_unstratified.tse)))
+## WildR mice have more Gene families per sample mapped than SPF
+
+```{r}
+alpha_indices <- c("dbp_dominance", "gini", "observed_richness", "shannon_diversity")
+InputHumannData.tse <- addAlpha(InputHumannData.tse, assay.type = params$assayTested, index = alpha_indices)
+
+tmp <- sapply(alpha_indices, function(div) {
+  lm(as.formula(paste(div, "~", "sex + donor_microbiome_type")), data = colData(InputHumannData.tse))
+  
 }, USE.NAMES = TRUE, simplify = FALSE)
 
-table_results.df <- lm_alpha.list %>% 
-  lapply(broom::tidy) %>% 
+table_results.df <- tmp %>% lapply(broom::tidy) %>% 
   bind_rows(.id = "AlphaIndex") %>% 
   filter(!grepl("Intercept", term))
 
 table_results.df %>%
   kbl() %>% 
-  row_spec(which(table_results.df$p.value < 0.05), bold = TRUE) %>% 
+  row_spec(which(table_results.df$p.value < 0.05), bold = TRUE, color = "red2") %>% 
   kable_styling()
 ```
 
-# Compositional PCoA
+WildR microbiomes show more pathways and minimally more evenly distributed 
+abundances of such pathways.
+
+# Compositional differences in relation to the donor microbiome
 
 ```{r}
 dimRedName <- paste(params$beta_dist, "mds", sep = "_")
 # this will work once mia or TreeSummarizedExperiment fixes some things
-HUMAnN_genefamilies_unstratified.tse <- mia::addMDS(
-  HUMAnN_genefamilies_unstratified.tse,
-  assay.type = "gene_family_abundance_rpk_unstratified",
+InputHumannData.tse <- mia::addMDS(
+  InputHumannData.tse,
+  assay.type = params$assayTested,
   method = params$beta_dist,
-  ncomponents = 3, 
-  name = dimRedName
+  ncomponents = 3, name = dimRedName
   )
 
-variances_explained <- attr(reducedDim(HUMAnN_genefamilies_unstratified.tse, dimRedName), "eig")
+variances_explained <- attr(reducedDim(InputHumannData.tse, dimRedName), "eig")
 prop_variances_explained <- variances_explained/sum(variances_explained)
 
-project1_meta_with_MDS.df <- cbind.data.frame(as.data.frame(colData(HUMAnN_genefamilies_unstratified.tse)), reducedDim(HUMAnN_genefamilies_unstratified.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
+mds_data_for_plot.df <- cbind.data.frame(as.data.frame(colData(InputHumannData.tse)), reducedDim(InputHumannData.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
 
-beta_plot_basic <- project1_meta_with_MDS.df %>% 
-  ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = paste(sex, donor_microbiome_type))) + 
+beta_plot_all_features <- mds_data_for_plot.df %>% 
+  ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = paste(donor_microbiome_type, sex))) + 
   geom_point(size = 2) + 
   stat_ellipse(show.legend = FALSE) + 
   #scale_color_manual(values = ggsci::pal_jco()(6)) +
   theme(legend.position = "top") +
-  labs(color = "Sex and Microbiome",
+  labs(color = "Microbiome and Sex",
        x = paste0("MDS 1 [", round(prop_variances_explained[1]*100, 1), "%]"),
        y = paste0("MDS 2 [", round(prop_variances_explained[2]*100, 2), "%]")
   )
 
-beta_plot_basic
 ```
 
 ```{r}
-HUMAnN_genefamilies_unstratified.tse <- addPERMANOVA(
-  HUMAnN_genefamilies_unstratified.tse,
-  assay.type = "gene_family_abundance_rpk_unstratified",
+dimRedName <- paste(params$beta_dist, "mds", "no_UN.", sep = "_")
+# this will work once mia or TreeSummarizedExperiment fixes some things
+InputHumannData.tse <- mia::addMDS(
+  InputHumannData.tse[!startsWith(rownames(InputHumannData.tse), "UN"),],
+  assay.type = params$assayTested,
   method = params$beta_dist,
+  ncomponents = 3, name = dimRedName
+  )
+
+variances_explained <- attr(reducedDim(InputHumannData.tse, dimRedName), "eig")
+prop_variances_explained <- variances_explained/sum(variances_explained)
+
+mds_data_for_plot.df <- cbind.data.frame(as.data.frame(colData(InputHumannData.tse)), reducedDim(InputHumannData.tse, dimRedName) %>% as.data.frame() %>% set_names(paste("MDS", 1:ncol(.))))
+
+beta_plot_no_UNINT_UNMAP <- mds_data_for_plot.df %>% 
+  ggplot(aes(x = `MDS 1`, y = `MDS 2`, color = paste(donor_microbiome_type, sex))) + 
+  geom_point(size = 2) + 
+  stat_ellipse(show.legend = FALSE) + 
+  #scale_color_manual(values = ggsci::pal_jco()(6)) +
+  theme(legend.position = "top") +
+  labs(color = "Microbiome and Sex",
+       x = paste0("MDS 1 [", round(prop_variances_explained[1]*100, 1), "%]"),
+       y = paste0("MDS 2 [", round(prop_variances_explained[2]*100, 2), "%]")
+  )
+
+```
+
+```{r}
+ggsave(plot = beta_plot_all_features, filename = file.path(output_directories.list$beta_div_outdir, "bray_MDS_plot_all_features.png"), dpi = 600, height = 7.5, width = 6)
+ggsave(plot = beta_plot_no_UNINT_UNMAP, filename = file.path(output_directories.list$beta_div_outdir, "bray_MDS_plot_no_UNMAP_UNINT.png"), dpi = 600, height = 7.5, width = 6)
+
+ggarrange(beta_plot_all_features + labs(title = "All Features"),
+          beta_plot_no_UNINT_UNMAP + labs(title = "All except UNINTEGR. and UNMAPP."),
+          common.legend = TRUE)
+```
+
+## PERMANOVA statistics
+
+```{r}
+
+InputHumannData.tse <- addPERMANOVA(
+  InputHumannData.tse,
+  assay.type = params$assayTested,
+  method = "bray",
   formula = x ~ sex + donor_microbiome_type,
   name = "permanova",
   permutations = 999,
   test.homogeneity = TRUE
 )
 
-permanova_table.df <- PERMANOVA_to_table(HUMAnN_genefamilies_unstratified.tse)
+permanova_table.df <- PERMANOVA_to_table(InputHumannData.tse)
 
 write_tsv(permanova_table.df, file = file.path(output_directories.list$beta_div_outdir, paste(params$beta_dist, "adonisPermanova", "sex", "donor_microbiome_type.tsv", sep = "_")))
 ```
@@ -171,21 +251,24 @@ permanova_table.df %>%
   kable_styling()
 ```
 
+# Differentially abundant taxa in `WildR` mice compared to SPF (with `limma`)
 
-## Differential abundant gene families per microbiome type
+## Sex adjusted
 
-### Sex adjusted
+$$
+\log_2(Pathway) \sim sex + \text{donor_microbiome_type}
+$$
 
 ```{r}
 # prepare input data
 
-tmp.tse <- HUMAnN_genefamilies_unstratified.tse
+tmp.tse <- InputHumannData.tse
 tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
 tmp.tse
 
 # define experiment name and output directories
 maaslin3_expmt <- "WildR_vs_SPF_adj_sex"
-maaslin3_final_outdir <- file.path(params$basic_outdir, params$humann_data_type, maaslin3_expmt)
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
 # create definitive output directory
 dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
 ```
@@ -193,148 +276,286 @@ dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
 Results are stored in ``r maaslin3_final_outdir``
 
 ```{r}
-set.seed(1234)
-WildR_vs_SPF_adj_sex.maaslin3 <- maaslin3(
-    input_data = tmp.tse,
-    formula = ~ sex + donor_microbiome_type, 
-    transform = "LOG", 
-    normalization = "TSS",
-    output = maaslin3_final_outdir,
-    # do not standardize continuous metadata variables in the model
-    standardize = FALSE,
-    # filter to have at least 100 counts in 2 samples
-    min_abundance = 100, 
-    min_prevalence = 2/ncol(tmp.tse),
-    plot_associations = FALSE,
-    save_plots_rds = TRUE,
-    min_variance = 0.5, 
-    cores = 8
-  )
+design.mat <-model.matrix(~ sex + donor_microbiome_type, data = colData(tmp.tse))
+# log2 counts per million transformation
+assay.voom <- voom(assay(tmp.tse), design = design.mat, plot = TRUE)
 
-WildR_vs_SPF_adj_sex_curated.maaslin3 <- list(
-  prevalence = WildR_vs_SPF_adj_sex.maaslin3$fit_prevalence$results,
-  abundance = WildR_vs_SPF_adj_sex.maaslin3$fit_abundance$results
+limma.fit <- lmFit(assay.voom, design.mat)
+limma.fit <- eBayes(limma.fit)
+
+results_table <- topTable(limma.fit, coef = "donor_microbiome_typeWildR", n = Inf, sort.by = "P", adjust.method = "BH") %>% 
+  rownames_to_column(params$microbiome_data_type)
+
+# populate with some context like mean abundance or number of cases/controls
+N_case_ctrl <- split(x = as.data.frame(t(assay(tmp.tse))), f = colData(tmp.tse)$donor_microbiome_type) %>% 
+  lapply(function(x) colSums(x > 0))
+mean_log2_abund <- split(x= as.data.frame(t(log2(assay(tmp.tse) + 0.5))), f = colData(tmp.tse)$donor_microbiome_type) %>% 
+  lapply(colMeans)
+
+someStats <- tibble(
+  !!sym(params$microbiome_data_type) := names(N_case_ctrl$SPF),
+  N_WildR = N_case_ctrl$WildR,
+  N_SPF = N_case_ctrl$SPF,
+  mean_log2_abund_WildR = mean_log2_abund$WildR,
+  mean_log2_abund_SPF = mean_log2_abund$SPF
 )
 
-# write tables
-write_maaslin3_curated_tables(WildR_vs_SPF_adj_sex_curated.maaslin3, out.dir = maaslin3_final_outdir)
-# save raw output
-saveRDS(WildR_vs_SPF_adj_sex.maaslin3, file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
-# copy their .RDS ggplot object 
-system(paste("cp", file.path(maaslin3_tmp_outdir, "figures", "summary_plot_gg.RDS"), maaslin3_final_outdir))
-
+results_table_populated <- dplyr::left_join(results_table, someStats, by = params$microbiome_data_type) %>% 
+  relocate(B, .after = "t")
 ```
 
-### Males
+```{r}
+write_tsv(results_table_populated, file = file.path(maaslin3_final_outdir, "all_results_limma.tsv"))
+```
+
+## Males
 
 ```{r}
 # prepare input data
 
-tmp.tse <- HUMAnN_genefamilies_unstratified.tse[colData(HUMAnN_genefamilies_unstratified.tse)$sex == "Male",]
+tmp.tse <- InputHumannData.tse[,colData(InputHumannData.tse)$sex == "Male"]
 tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
 tmp.tse
 
 # define experiment name and output directories
 maaslin3_expmt <- "WildR_vs_SPF_Males"
-maaslin3_final_outdir <- file.path(params$basic_outdir, params$humann_data_type, maaslin3_expmt)
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
 # create definitive output directory
 dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
 ```
 
-Results are stored in ``r maaslin3_final_outdir``
-
 ```{r}
-set.seed(1234)
-WildR_vs_SPF_Males.maaslin3 <- maaslin3(
-    input_data = tmp.tse,
-    formula = ~ sex + donor_microbiome_type, 
-    transform = "LOG", 
-    normalization = "TSS",
-    output = maaslin3_final_outdir,
-    # do not standardize continuous metadata variables in the model
-    standardize = FALSE,
-    # filter to have at least 100 counts in 2 samples
-    min_abundance = 100, 
-    min_prevalence = 2/ncol(tmp.tse),
-    plot_associations = FALSE,
-    save_plots_rds = TRUE,
-    verbosity = "ERROR"
-  )
+design.mat <-model.matrix(~ donor_microbiome_type, data = colData(tmp.tse))
+# log2 counts per million transformation
+assay.voom <- voom(assay(tmp.tse), design = design.mat, plot = TRUE)
 
-WildR_vs_SPF_Males_curated.maaslin3 <- list(
-  prevalence = WildR_vs_SPF_Males.maaslin3$fit_prevalence$results,
-  abundance = WildR_vs_SPF_Males.maaslin3$fit_abundance$results
+limma.fit <- lmFit(assay.voom, design.mat)
+limma.fit <- eBayes(limma.fit)
+
+results_table <- topTable(limma.fit, coef = "donor_microbiome_typeWildR", n = Inf, sort.by = "P", adjust.method = "BH") %>% 
+  rownames_to_column(params$microbiome_data_type)
+
+# populate with some context like mean abundance or number of cases/controls
+N_case_ctrl <- split(x = as.data.frame(t(assay(tmp.tse))), f = colData(tmp.tse)$donor_microbiome_type) %>% 
+  lapply(function(x) colSums(x > 0))
+mean_log2_abund <- split(x= as.data.frame(t(log2(assay(tmp.tse) + 0.5))), f = colData(tmp.tse)$donor_microbiome_type) %>% 
+  lapply(colMeans)
+
+someStats <- tibble(
+  !!sym(params$microbiome_data_type) := names(N_case_ctrl$SPF),
+  N_WildR = N_case_ctrl$WildR,
+  N_SPF = N_case_ctrl$SPF,
+  mean_log2_abund_WildR = mean_log2_abund$WildR,
+  mean_log2_abund_SPF = mean_log2_abund$SPF
 )
 
-# write tables
-write_maaslin3_curated_tables(WildR_vs_SPF_Males_curated.maaslin3, out.dir = maaslin3_final_outdir)
-# save raw output
-saveRDS(WildR_vs_SPF_Males.maaslin3, file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
-# copy their .RDS ggplot object 
-system(paste("cp", file.path(maaslin3_tmp_outdir, "figures", "summary_plot_gg.RDS"), maaslin3_final_outdir))
-
+results_table_populated <- dplyr::left_join(results_table, someStats, by = params$microbiome_data_type) %>% 
+  relocate(B, .after = "t")
 ```
 
-### Females
+```{r}
+write_tsv(results_table_populated, file = file.path(maaslin3_final_outdir, "all_results_limma.tsv"))
+```
+
+## Females
 
 ```{r}
 # prepare input data
 
-tmp.tse <- HUMAnN_genefamilies_unstratified.tse[colData(HUMAnN_genefamilies_unstratified.tse)$sex == "Female",]
+tmp.tse <- InputHumannData.tse[,colData(InputHumannData.tse)$sex == "Female"]
 tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
 tmp.tse
 
 # define experiment name and output directories
 maaslin3_expmt <- "WildR_vs_SPF_Females"
-maaslin3_final_outdir <- file.path(params$basic_outdir, params$humann_data_type, maaslin3_expmt)
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
 # create definitive output directory
 dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
 ```
 
-Results are stored in ``r maaslin3_final_outdir``
-
 ```{r}
-set.seed(1234)
-WildR_vs_SPF_Females.maaslin3 <- maaslin3(
-    input_data = tmp.tse,
-    formula = ~ sex + donor_microbiome_type, 
-    transform = "LOG", 
-    normalization = "TSS",
-    output = maaslin3_final_outdir,
-    # do not standardize continuous metadata variables in the model
-    standardize = FALSE,
-    # filter to have at least 100 counts in 2 samples
-    min_abundance = 100, 
-    min_prevalence = 2/ncol(tmp.tse),
-    plot_associations = FALSE,
-    save_plots_rds = TRUE,
-    verbosity = "ERROR"
-  )
+design.mat <-model.matrix(~ donor_microbiome_type, data = colData(tmp.tse))
+# log2 counts per million transformation
+assay.voom <- voom(assay(tmp.tse), design = design.mat, plot = TRUE)
 
-WildR_vs_SPF_Females_curated.maaslin3 <- list(
-  prevalence = WildR_vs_SPF_Females.maaslin3$fit_prevalence$results,
-  abundance = WildR_vs_SPF_Females.maaslin3$fit_abundance$results
+limma.fit <- lmFit(assay.voom, design.mat)
+limma.fit <- eBayes(limma.fit)
+
+results_table <- topTable(limma.fit, coef = "donor_microbiome_typeWildR", n = Inf, sort.by = "P", adjust.method = "BH") %>% 
+  rownames_to_column(params$microbiome_data_type)
+
+# populate with some context like mean abundance or number of cases/controls
+N_case_ctrl <- split(x = as.data.frame(t(assay(tmp.tse))), f = colData(tmp.tse)$donor_microbiome_type) %>% 
+  lapply(function(x) colSums(x > 0))
+mean_log2_abund <- split(x= as.data.frame(t(log2(assay(tmp.tse) + 0.5))), f = colData(tmp.tse)$donor_microbiome_type) %>% 
+  lapply(colMeans)
+
+someStats <- tibble(
+  !!sym(params$microbiome_data_type) := names(N_case_ctrl$SPF),
+  N_WildR = N_case_ctrl$WildR,
+  N_SPF = N_case_ctrl$SPF,
+  mean_log2_abund_WildR = mean_log2_abund$WildR,
+  mean_log2_abund_SPF = mean_log2_abund$SPF
 )
 
-# write tables
-write_maaslin3_curated_tables(WildR_vs_SPF_Females_curated.maaslin3, out.dir = maaslin3_final_outdir)
-# save raw output
-saveRDS(WildR_vs_SPF_Females.maaslin3, file.path(maaslin3_final_outdir, "maaslin3_raw_output.rds"))
-# copy their .RDS ggplot object 
-system(paste("cp", file.path(maaslin3_tmp_outdir, "figures", "summary_plot_gg.RDS"), maaslin3_final_outdir))
-
+results_table_populated <- dplyr::left_join(results_table, someStats, by = params$microbiome_data_type) %>% 
+  relocate(B, .after = "t")
 ```
 
-# Example information retrieval for a UniRef90 entry
-use [uniPark entry mapper](https://search.r-project.org/CRAN/refmans/rbioapi/html/rba_uniprot_uniparc.html)
 ```{r}
-
+write_tsv(results_table_populated, file = file.path(maaslin3_final_outdir, "all_results_limma.tsv"))
 ```
 
+# Differentially abundant/prevalent taxa in `WildR` mice compared to SPF (with `MaAsLin3`)
+
+MaAsLin3 fails with approx. more than 2,000 features to test. While this could
+be fixed, it is a burdensome method, and modeling a chunk of 2000 features 
+takes 2' 30'', which means ~ 12 h user time on 8 cores. While technically,
+MaAsLin3 is widely impractical for Gene Families. Nevertheless, below is 
+an example of how to generate results for all (or most) features. 
+The code still stops with an error on the incomplete chunk:
+`one node produced an error: attempt to set 'rownames' on an object with no dimensions` 
+
+## Sex-adjusted
+
+```{r, eval=FALSE}
+# prepare input data
+
+tmp.tse <- InputHumannData.tse
+tmp.tse <- tmp.tse[rowSums(assay(tmp.tse)) > 0 , ]
+tmp.tse
+
+# define experiment name and output directories
+maaslin3_expmt <- "WildR_vs_SPF_adj_sex"
+maaslin3_final_outdir <- file.path(params$basic_outdir, params$microbiome_data_type, maaslin3_expmt)
+# create definitive output directory
+dir.create(maaslin3_final_outdir, showWarnings = FALSE, recursive = TRUE)
+```
+
+```{r maaslin3 in parallel attempt with bplapply, eval=FALSE}
+#----- Setup parameters---
+set.seed(1234)
+chunkSize <- 2e3
+exact_division <- nrow(tmp.tse) %/% chunkSize
+#------------------------
+library(BiocParallel)
+multicoreParam <- registered()$MulticoreParam
+multicoreParam$workers <- multicoreParam$workers - 2
+
+WildR_vs_SPF_adj_Sex.maaslin3 <- bplapply(1:(exact_division + 1), FUN = function(i) {
+  # create subsetting indices
+  min_indx <- (chunkSize*(i-1) + 1)
+  max_indx <- min(i*chunkSize, nrow(tmp.tse))
+  # create output directory for the chunk
+  maaslin3_final_outdir_chunk <- file.path(maaslin3_final_outdir, paste0("chunk.", i))
+  dir.create(maaslin3_final_outdir_chunk)
+  
+  # subset the original data matrix
+  tmp.tse_sub <- tmp.tse[min_indx:max_indx,]
+  
+  # perform MaAsLin3 and don't bother saving it to memory
+  maaslin3(
+    input_data = tmp.tse_sub,
+    formula = ~ sex + donor_microbiome_type, 
+    transform = "LOG",
+    output = maaslin3_final_outdir_chunk,
+    # do not standardize continuous metadata variables in the model
+    standardize = FALSE,
+    plot_associations = FALSE,
+    save_plots_rds = TRUE,
+		verbosity = "ERROR", 
+		cores = 1
+  )
+  return(file.path(maaslin3_final_outdir_chunk, "all_results.tsv"))
+}, BPPARAM = multicoreParam
+)
+```
+
+```{r maaslin3 in parallel attempt with parLapply, eval=FALSE}
+#----- Setup parameters---
+set.seed(1234)
+chunkSize <- 2e3
+# Ensure you have the full object name for nrow()
+exact_division <- nrow(tmp.tse) %/% chunkSize 
+num_cores <- 10 # How many cores to use
+
+#------------------------
+# 1. Load the parallel library
+library(parallel)
+
+# 2. Create a socket cluster (the safe way)
+# This creates 'num_cores' new, clean R sessions.
+cl <- makePSOCKcluster(num_cores)
+
+# 3. Export necessary objects to the cluster
+# The new R sessions don't know about the objects in your main session,
+# so we have to send them the data and variables they will need.
+clusterExport(cl, varlist = c("tmp.tse", "chunkSize", "maaslin3_final_outdir"))
+
+# 4. Load required libraries on each worker in the cluster
+# Each new session also needs the Maaslin3 library loaded.
+clusterEvalQ(cl, {
+  library(maaslin3)
+})
+
+# 5. Run the analysis using parLapply
+WildR_vs_SPF_adj_Sex.maaslin3 <- parLapply(cl, 1:(exact_division + 1), fun = function(i) {
+  # create subsetting indices
+  min_indx <- (chunkSize * (i - 1) + 1)
+  max_indx <- min(i * chunkSize, nrow(tmp.tse))
+  
+  # create output directory for the chunk
+  maaslin3_final_outdir_chunk <- file.path(maaslin3_final_outdir, paste0("chunk.", i))
+  # Use showWarnings = FALSE and recursive = TRUE for cleaner execution
+  dir.create(maaslin3_final_outdir_chunk, showWarnings = FALSE, recursive = TRUE)
+  
+  # subset the original data matrix
+  tmp.tse_sub <- tmp.tse[min_indx:max_indx, ]
+  
+  # perform MaAsLin3
+  maaslin3(
+    input_data = tmp.tse_sub,
+    formula = ~ sex + donor_microbiome_type, 
+    transform = "LOG",
+    output = maaslin3_final_outdir_chunk,
+    standardize = FALSE,
+    plot_associations = FALSE,
+    save_plots_rds = TRUE,
+    verbosity = "ERROR", 
+    cores = 1
+  )
+  
+  # Return the path to the results file for this chunk
+  return(file.path(maaslin3_final_outdir_chunk, "all_results.tsv"))
+})
+
+# 6. IMPORTANT: Always stop the cluster when you're done
+# This closes the extra R sessions and frees up memory.
+stopCluster(cl)
+```
+
+then you need to read-in all results and bind them. it would be easier to `cat` 
+from bash.
+
+```{r}
+full_path <- file.path(getwd(), maaslin3_final_outdir)
+common_header <- read_tsv(file.path(maaslin3_final_outdir, "chunk.1", "all_results.tsv"), n_max = 1) %>% 
+  colnames()
+readr::read_tsv(file.path(full_path, "chunk.2", "all_results.tsv"))
+
+results_readIn.dt <- data.table::fread(cmd = sprintf("find %s -type f -name 'all_results.tsv' -exec cat {} +", full_path), col.names = common_header)
+# remove extra headers
+results_readIn.dt <- results_readIn.dt[feature != "feature",]
+
+# re-write as cumulative results
+write_tsv(results_readIn.dt, file = file.path(maaslin3_final_outdir, "all_results_joinedChunks.tsv"))
+
+# show it
+results_readIn.dt
+```
 
 # Session Info
 
 ```{r}
 sessionInfo()
 ```
-
